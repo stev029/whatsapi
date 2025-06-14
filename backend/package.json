@@ -1,0 +1,14 @@
+{
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "chromium": "^3.0.3",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "fs-extra": "^11.3.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.15.2",
+    "qrcode-terminal": "^0.12.0",
+    "socket.io": "^4.8.1",
+    "whatsapp-web.js": "^1.30.0"
+  }
+}

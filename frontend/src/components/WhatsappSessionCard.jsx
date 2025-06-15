@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import QRCode from 'qrcode.react'; // Install: npm install qrcode.react
+import { QRCodeCanvas } from 'qrcode.react'; // Install: npm install qrcode.react
 
 function WhatsappSessionCard({ session, onDeleteSession, onSendMessage }) {
     const [messageInput, setMessageInput] = useState('');
@@ -60,7 +60,7 @@ function WhatsappSessionCard({ session, onDeleteSession, onSendMessage }) {
                 <div className="flex flex-col items-center my-4">
                     <p className="text-center text-gray-700 mb-2">Scan this QR Code:</p>
                     <div className="p-2 border border-gray-300 rounded-lg bg-white">
-                        <QRCode value={session.qr} size={180} level="H" />
+                        <QRCodeCanvas value={session.qr} size={180} level="H" />
                     </div>
                 </div>
             )}

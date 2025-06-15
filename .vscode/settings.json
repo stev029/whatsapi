@@ -1,4 +1,9 @@
 {
     "IDX.aI.enableInlineCompletion": true,
-    "IDX.aI.enableCodebaseIndexing": true
+    "IDX.aI.enableCodebaseIndexing": true,
+    "piny.project_settings": {
+        "open-pages": [
+            "pinyfakepage.html"
+        ]
+    }
 }

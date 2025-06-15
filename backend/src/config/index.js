@@ -3,7 +3,11 @@ require('dotenv').config();
 
 module.exports = {
     port: process.env.PORT || 3000,
+    mode: process.env.MODE || 'dev',
     sessionDir: './sessions',
+    allowCorsOrigins: '*',
+    allowCorsMethods: ['PUT', 'DELETE', 'POST', 'GET'],
+    allowCorsHeaders: ['Content-Type', 'Authorization', 'X-Session-Token'],
     jwtSecret: process.env.JWT_SECRET,
     maxSessionsPerUser: parseInt(process.env.MAX_SESSIONS_PER_USER || '2', 10),
     mongoUri: process.env.MONGO_URI,

@@ -1,6 +1,7 @@
 import axios from 'axios';
+import config from '../config'
 
-const API_BASE_URL = 'http://localhost:3000'; // Ganti jika backend Anda di port lain
+const API_BASE_URL = config.API_BASE_URL; // Ganti jika backend Anda di port lain
 
 export const registerUser = async (username, password) => {
     try {

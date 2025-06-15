@@ -5,13 +5,17 @@
   "dependencies": {
     "bcrypt": "^6.0.0",
     "chromium": "^3.0.3",
+    "cors": "^2.8.5",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
     "fs-extra": "^11.3.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.15.2",
+    "morgan": "^1.10.0",
     "qrcode-terminal": "^0.12.0",
     "socket.io": "^4.8.1",
-    "whatsapp-web.js": "^1.30.0"
+    "whatsapp-web.js": "^1.30.0",
+    "winston": "^3.17.0",
+    "winston-daily-rotate-file": "^5.0.0"
   }
 }

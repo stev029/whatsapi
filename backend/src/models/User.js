@@ -15,12 +15,13 @@ const UserSchema = new mongoose.Schema({
     required: true,
   },
   whatsappSessions: [
-    // Array objek untuk menyimpan detail sesi WhatsApp
     {
       phoneNumber: { type: String, required: true },
-      secretToken: { type: String, required: true, unique: true, sparse: true }, // Secret token unik per sesi
-      status: { type: String, default: "LOADING" }, // Status sesi (LOADING, QR_READY, READY, etc.)
+      secretToken: { type: String, required: true, unique: true, sparse: true }, // Token unik untuk otentikasi sesi
+      status: { type: String, default: "LOADING" }, // Status sesi (CONNECTING, QR_READY, READY, LOGOUT, CLOSED)
       lastUpdated: { type: Date, default: Date.now },
+      // Menambahkan field untuk menyimpan kredensial Baileys
+      // Ini akan menyimpan key-pair dan session data lainnya
     },
   ],
   createdAt: {
@@ -43,4 +44,3 @@ UserSchema.methods.comparePassword = async function (candidatePassword) {
 const User = mongoose.model("User", UserSchema);
 
 module.exports = User;
-

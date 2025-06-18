@@ -1,440 +1,651 @@
 // src/services/whatsappService.js
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const fs = require('fs-extra');
-const path = require('path');
-const jwt = require('jsonwebtoken'); // Import JWT untuk secret token sesi
-const config = require('../config');
-const User = require('../models/User');
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  jidNormalizedUser,
+  // Tambahkan ini untuk pairing code
+  isJidBroadcast, // Untuk memeriksa apakah JID adalah broadcast
+  isJidGroup, // Untuk memeriksa apakah JID adalah grup
+  makeInMemoryStore, // Berguna untuk menyimpan data chat sementara jika Anda mau
+} = require("baileys");
+const { Boom } = require("@hapi/boom");
+const pino = require("pino");
+const path = require("path");
+const fs = require("fs-extra");
+const jwt = require("jsonwebtoken");
+const config = require("../config");
+const User = require("../models/User");
+const logger = require("../config/logger");
 
-// Objek untuk menyimpan semua klien WhatsApp yang aktif
-const clients = {}; // { phoneNumber: ClientInstance }
+// Objek untuk menyimpan semua klien Baileys yang aktif
+const clients = {}; // { phoneNumber: BaileysSocketInstance }
 const qrCodes = {}; // { phoneNumber: qrData }
-const clientStatuses = {}; // { phoneNumber: 'LOADING' | 'QR_READY' | 'READY' | 'DISCONNECTED' | 'AUTH_FAILURE' | 'ERROR' }
+const pairingCodes = {}; // { phoneNumber: pairingCode } <-- Tambahkan ini
+const clientStatuses = {}; // { phoneNumber: 'CONNECTING' | 'QR_READY' | 'PAIRING_READY' | 'READY' | 'LOGOUT' | 'CLOSED' | 'AUTH_FAILURE' | 'ERROR' | 'DISCONNECTED' }
 const qrTimeouts = {}; // { phoneNumber: TimeoutInstance }
+
+// Baileys logger
+const loggerBaileys = pino({ level: "info", stream: process.stdout });
+
+// Lokasi penyimpanan sesi Baileys
+const SESSIONS_DIR = path.resolve(__dirname, "../../whatsapp_sessions");
 
 // Fungsi untuk menghasilkan secret token sesi
 function generateSessionToken(userId, phoneNumber) {
-    return jwt.sign({ userId, phoneNumber }, config.sessionSecret, { expiresIn: '1y' }); // Token sesi bisa lebih lama
+  return jwt.sign({ userId, phoneNumber }, config.sessionSecret, {
+    expiresIn: "1y",
+  });
 }
 
-// Fungsi untuk menghapus sesi secara paksa (dari memori dan disk)
-async function destroySession(phoneNumber, userId, io, reason = 'Timeout') {
-    console.log(`Destroying session for ${phoneNumber} due to: ${reason}`);
+// Fungsi untuk menghapus sesi secara paksa (dari memori, DB, dan disk)
+async function destroySession(phoneNumber, userId, io, reason = "Timeout") {
+  logger.info(`Destroying session for ${phoneNumber} due to: ${reason}`);
 
-    const client = clients[phoneNumber];
-    if (client) {
-        try {
-            await client.destroy(); // Tutup browser dan hapus sesi
-        } catch (err) {
-            console.error(`Error destroying whatsapp-web.js client for ${phoneNumber}:`, err.message);
-        }
-        clients[phoneNumber].destroy()
-        delete clients[phoneNumber];
+  const sock = clients[phoneNumber];
+  if (sock) {
+    try {
+      await sock.logout(); // Logout dari WhatsApp
+      logger.info(`Baileys client for ${phoneNumber} logged out.`);
+    } catch (err) {
+      logger.error(
+        `Error logging out Baileys client for ${phoneNumber}: ${err.message}`,
+        err.stack,
+      );
+    } finally {
+      delete clients[phoneNumber];
     }
+  }
 
-    delete qrCodes[phoneNumber];
-    delete clientStatuses[phoneNumber];
-    if (qrTimeouts[phoneNumber]) {
-        clearTimeout(qrTimeouts[phoneNumber]);
-        delete qrTimeouts[phoneNumber];
-    }
-
-    const sessionPath = path.join(config.sessionDir, `session_${phoneNumber}`);
+  delete qrCodes[phoneNumber];
+  delete pairingCodes[phoneNumber]; // <-- Hapus pairing code
+  delete clientStatuses[phoneNumber];
+  if (qrTimeouts[phoneNumber]) {
+    clearTimeout(qrTimeouts[phoneNumber]);
+    delete qrTimeouts[phoneNumber];
+  }
+  // Hapus folder sesi dari disk
+  const sessionPath = path.join(SESSIONS_DIR, phoneNumber);
+  try {
     if (await fs.pathExists(sessionPath)) {
-        try {
-            await fs.remove(sessionPath); // Hapus folder sesi dari disk
-            console.log(`Session folder for ${phoneNumber} removed.`);
-        } catch (err) {
-            console.error(`Error removing session folder ${sessionPath}:`, err.message);
-        }
+      await fs.remove(sessionPath);
+      logger.info(
+        `Session directory for ${phoneNumber} (${sessionPath}) removed.`,
+      );
     }
+  } catch (fsErr) {
+    logger.error(
+      `Error removing session directory ${sessionPath}: ${fsErr.message}`,
+      fsErr.stack,
+    );
+  }
 
-    // Update status di database User
+  // Update status di database User (hapus entri sesi)
+  try {
     const user = await User.findById(userId);
     if (user) {
-        user.whatsappSessions = user.whatsappSessions.filter(s => s.phoneNumber !== phoneNumber);
-        await user.save();
-    }
-
-    if (io) io.emit('client_status', { phoneNumber, status: 'DESTROYED', reason, userId });
-}
-
-
-// Fungsi untuk membuat dan menginisialisasi klien WhatsApp baru
-async function createClient(userId, phoneNumber, io) {
-    const user = await User.findById(userId);
-    if (!user) {
-        throw new Error('User not found.');
-    }
-
-    // Cek apakah sesi ini sudah ada untuk user ini, jika ya, gunakan yang sudah ada
-    let sessionEntry = user.whatsappSessions.find(s => s.phoneNumber === phoneNumber);
-    if (sessionEntry) {
-        // Jika sudah ada, tapi statusnya DISCONNECTED atau ERROR, coba inisialisasi ulang
-        if (clientStatuses[phoneNumber] === 'READY') {
-             console.log(`Client for ${phoneNumber} already ready.`);
-             return { success: true, message: 'Client is already ready.', sessionToken: sessionEntry.secretToken };
-        }
-        console.log(`Re-initializing existing session for ${phoneNumber}.`);
-        // Jika statusnya loading/qr_ready, mungkin sudah dalam proses
-        if (clientStatuses[phoneNumber] === 'LOADING' || clientStatuses[phoneNumber] === 'QR_READY') {
-            return { success: true, message: 'Client is already initializing.', sessionToken: sessionEntry.secretToken };
-        }
+      user.whatsappSessions = user.whatsappSessions.filter(
+        (s) => s.phoneNumber !== phoneNumber,
+      );
+      await user.save();
+      logger.info(
+        `Session entry for ${phoneNumber} removed from user ${userId}'s DB record.`,
+      );
     } else {
-        // Jika sesi baru, cek batasan
-        if (user.whatsappSessions.length >= config.maxSessionsPerUser) {
-            throw new Error(`You have reached the maximum limit of ${config.maxSessionsPerUser} WhatsApp sessions.`);
-        }
-        // Buat secret token baru untuk sesi ini
-        sessionEntry = {
-            phoneNumber,
-            secretToken: generateSessionToken(userId, phoneNumber),
-            status: 'LOADING' // Set status awal di objek sesi
-        };
-        user.whatsappSessions.push(sessionEntry);
-        await user.save(); // Simpan perubahan ke DB
+      logger.warn(
+        `User with ID ${userId} not found when trying to destroy session ${phoneNumber}.`,
+      );
     }
-
-    const sessionPath = path.join(config.sessionDir, `session_${phoneNumber}`);
-    await fs.ensureDir(sessionPath);
-
-    const client = new Client({
-        authStrategy: new LocalAuth({
-            clientId: phoneNumber,
-            dataPath: sessionPath
-        }),
-        puppeteer: {
-            args: [
-                '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote',
-                '--single-process', '--disable-gpu'
-            ],
-        }
-    });
-
-    clients[phoneNumber];
-    clientStatuses[phoneNumber] = 'LOADING'; // Update status global
-    // Update status di DB juga
-    await User.updateOne(
-        { _id: userId, 'whatsappSessions.phoneNumber': phoneNumber },
-        { '$set': { 'whatsappSessions.$.status': 'LOADING', 'whatsappSessions.$.lastUpdated': Date.now() } }
+  } catch (dbError) {
+    logger.error(
+      `Error removing session ${phoneNumber} from DB for user ${userId}: ${dbError.message}`,
+      dbError.stack,
     );
+  }
 
-
-    // Event Listeners untuk klien ini
-    client.on('qr', qr => {
-        console.log(`QR RECEIVED for ${phoneNumber}:`, qr);
-        qrCodes[phoneNumber] = qr;
-        clientStatuses[phoneNumber] = 'QR_READY';
-        io.emit('qr_code', { phoneNumber, qr, userId, secretToken: sessionEntry.secretToken });
-
-        // Mulai timer penghapusan otomatis
-        qrTimeouts[phoneNumber] = setTimeout(async () => {
-            if (clientStatuses[phoneNumber] !== 'READY') { // Jika belum siap dalam waktu timeout
-                await destroySession(phoneNumber, userId, io, 'QR_TIMEOUT');
-                console.log(`Session for ${phoneNumber} removed due to QR timeout.`);
-            }
-        }, config.qrTimeoutMinutes * 60 * 1000); // Konversi menit ke milidetik
-
-        // Update status di DB
-        User.updateOne(
-            { _id: userId, 'whatsappSessions.phoneNumber': phoneNumber },
-            { '$set': { 'whatsappSessions.$.status': 'QR_READY', 'whatsappSessions.$.lastUpdated': Date.now() } }
-        ).exec();
+  if (io)
+    io.emit("client_status", {
+      phoneNumber,
+      status: "DESTROYED",
+      reason,
+      userId,
     });
-
-    client.on('ready', async () => {
-        console.log(`Client ${phoneNumber} is ready!`);
-        clientStatuses[phoneNumber] = 'READY';
-        delete qrCodes[phoneNumber];
-        if (qrTimeouts[phoneNumber]) {
-            clearTimeout(qrTimeouts[phoneNumber]); // Hentikan timer jika sudah siap
-            delete qrTimeouts[phoneNumber];
-        }
-        io.emit('client_status', { phoneNumber, status: 'READY', userId, secretToken: sessionEntry.secretToken });
-
-        // Update status di DB
-        await User.updateOne(
-            { _id: userId, 'whatsappSessions.phoneNumber': phoneNumber },
-            { '$set': { 'whatsappSessions.$.status': 'READY', 'whatsappSessions.$.lastUpdated': Date.now() } }
-        );
-    });
-
-    client.on('message', async msg => {
-        console.log(`MESSAGE from ${phoneNumber}:`, msg.body);
-        io.emit('new_message', { phoneNumber, message: msg.body, from: msg.from, userId, secretToken: sessionEntry.secretToken });
-
-        if (msg.body.toLowerCase() === 'halo') {
-            msg.reply('Halo kembali!');
-        } else if (msg.body.toLowerCase() === '!status') {
-            const clientInfo = clients[phoneNumber] && clients[phoneNumber].info;
-            if (clientInfo) {
-                msg.reply(`Status: Connected (from ${clientInfo.pushname})`);
-            } else {
-                msg.reply('Status: Disconnected');
-            }
-        }
-    });
-
-    client.on('disconnected', async (reason) => {
-        console.log(`Client ${phoneNumber} was disconnected:`, reason);
-        clientStatuses[phoneNumber] = 'DISCONNECTED';
-        io.emit('client_status', { phoneNumber, status: 'DISCONNECTED', reason, userId, secretToken: sessionEntry.secretToken });
-
-        // Hentikan timer jika sesi terputus sebelum siap
-        if (qrTimeouts[phoneNumber]) {
-            clearTimeout(qrTimeouts[phoneNumber]);
-            delete qrTimeouts[phoneNumber];
-        }
-
-        // Jangan langsung destroy, biarkan client.initialize() berikutnya yang menghandle
-        // atau jika ingin langsung hapus, panggil destroySession di sini
-        // Untuk saat ini, kita hanya update status dan hapus dari objek memory
-        delete clients[phoneNumber];
-        delete qrCodes[phoneNumber];
-
-        // Update status di DB menjadi DISCONNECTED
-        const updatedUser = await User.findOneAndUpdate(
-            { _id: userId, 'whatsappSessions.phoneNumber': phoneNumber },
-            { '$set': { 'whatsappSessions.$.status': 'DISCONNECTED', 'whatsappSessions.$.lastUpdated': Date.now() } },
-            { new: true } // Return the updated document
-        );
-        // Jika sesi terputus, kita mungkin tidak perlu menghapus dari whatsappSessions user
-        // tapi biarkan dia ada dengan status DISCONNECTED, agar bisa di-reconnect
-        if (updatedUser) {
-            console.log(`User ${updatedUser.username} sessions after disconnect:`, updatedUser.whatsappSessions.map(s => `${s.phoneNumber}(${s.status})`).join(', '));
-        }
-    });
-
-    client.on('auth_failure', async msg => {
-        console.error(`Authentication failure for ${phoneNumber}:`, msg);
-        clientStatuses[phoneNumber] = 'AUTH_FAILURE';
-        io.emit('client_status', { phoneNumber, status: 'AUTH_FAILURE', message: msg, userId, secretToken: sessionEntry.secretToken });
-
-        // Hapus sesi jika terjadi auth failure
-        await destroySession(phoneNumber, userId, io, 'AUTH_FAILURE');
-    });
-
-    client.on('change_state', state => {
-        console.log(`Client ${phoneNumber} state changed:`, state);
-        io.emit('client_status', { phoneNumber, status: `STATE_${state}`, userId, secretToken: sessionEntry.secretToken });
-        // Update status di DB juga
-        User.updateOne(
-            { _id: userId, 'whatsappSessions.phoneNumber': phoneNumber },
-            { '$set': { 'whatsappSessions.$.status': `STATE_${state}`, 'whatsappSessions.$.lastUpdated': Date.now() } }
-        ).exec();
-    });
-
-
-    try {
-        await client.initialize();
-        return { success: true, message: 'Client initialization started.', sessionToken: sessionEntry.secretToken };
-    } catch (error) {
-        console.error(`Error initializing client for ${phoneNumber}:`, error);
-        clientStatuses[phoneNumber] = 'ERROR';
-        // Hapus sesi jika terjadi error saat inisialisasi awal
-        await destroySession(phoneNumber, userId, io, `INITIALIZATION_ERROR: ${error.message}`);
-        return { success: false, message: 'Error initializing client.', error: error.message };
-    }
 }
 
-// Fungsi untuk mendapatkan status klien, disaring berdasarkan pengguna
-async function getClientStatusForUser(userId) {
-    const user = await User.findById(userId);
-    if (!user) return {};
+// Fungsi untuk membuat dan menginisialisasi klien Baileys baru
+// Tambahkan parameter `usePairingCode`
+async function createClient(userId, phoneNumber, io, usePairingCode = true) {
+  logger.info(
+    `Attempting to create/restore client for ${phoneNumber} (User ID: ${userId}). Via Pairing Code: ${usePairingCode}.`,
+  );
 
-    const statuses = {};
-    for (const session of user.whatsappSessions) { // Iterasi melalui objek sesi di DB
-        const phoneNumber = session.phoneNumber;
-        statuses[phoneNumber] = {
-            status: clientStatuses[phoneNumber] || session.status || 'NOT_FOUND', // Ambil dari status global atau dari DB
-            qr: qrCodes[phoneNumber] || null,
-            info: clients[phoneNumber] && clients[phoneNumber].info ? {
-                pushname: clients[phoneNumber].info.pushname,
-                number: clients[phoneNumber].info.wid.user
-            } : null,
-            secretToken: session.secretToken // Sertakan secret token sesi
+  const user = await User.findById(userId);
+  if (!user) {
+    logger.error(
+      `User with ID ${userId} not found during createClient for ${phoneNumber}.`,
+    );
+    throw new Error("User not found.");
+  }
+
+  let sessionEntry = user.whatsappSessions.find(
+    (s) => s.phoneNumber === phoneNumber,
+  );
+  if (sessionEntry) {
+    if (clientStatuses[phoneNumber] === "READY") {
+      logger.info(`Client for ${phoneNumber} already ready in memory.`);
+      return {
+        success: true,
+        message: "Client is already ready.",
+        sessionToken: sessionEntry.secretToken,
+      };
+    }
+    if (
+      clientStatuses[phoneNumber] === "CONNECTING" ||
+      clientStatuses[phoneNumber] === "QR_READY" ||
+      clientStatuses[phoneNumber] === "PAIRING_READY"
+    ) {
+      logger.info(
+        `Client for ${phoneNumber} is already initializing in memory.`,
+      );
+      // Jika sudah ada QR atau Pairing Code yang dihasilkan, kirim ulang ke frontend
+      if (qrCodes[phoneNumber]) {
+        io.emit("qr_code", {
+          phoneNumber,
+          qr: qrCodes[phoneNumber],
+          userId,
+          secretToken: sessionEntry.secretToken,
+        });
+      } else if (pairingCodes[phoneNumber]) {
+        io.emit("pairing_code", {
+          phoneNumber,
+          code: pairingCodes[phoneNumber],
+          userId,
+          secretToken: sessionEntry.secretToken,
+        });
+      }
+      return {
+        success: true,
+        message: "Client is already initializing.",
+        sessionToken: sessionEntry.secretToken,
+      };
+    }
+  } else {
+    if (user.whatsappSessions.length >= config.maxSessionsPerUser) {
+      logger.warn(
+        `User ${userId} reached max sessions (${config.maxSessionsPerUser}) for ${phoneNumber}.`,
+      );
+      throw new Error(
+        `You have reached the maximum limit of ${config.maxSessionsPerUser} WhatsApp sessions.`,
+      );
+    }
+    sessionEntry = {
+      phoneNumber,
+      secretToken: generateSessionToken(userId, phoneNumber),
+      status: "CONNECTING",
+    };
+    user.whatsappSessions.push(sessionEntry);
+    await user.save();
+    logger.info(`New session entry created for ${phoneNumber} in DB.`);
+  }
+
+  // Pastikan direktori sesi ada
+  const sessionPath = path.join(SESSIONS_DIR, phoneNumber);
+  await fs.ensureDir(sessionPath);
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+  logger.debug(
+    `Multi-file auth state loaded/created for ${phoneNumber} in ${sessionPath}.`,
+  );
+
+  const { version, isLatest } = await fetchLatestBaileysVersion();
+  logger.info(
+    `Using WA v${version.join(".")}, isLatest: ${isLatest} for ${phoneNumber}.`,
+  );
+
+  const sock = makeWASocket({
+    version: version,
+    logger: loggerBaileys,
+    printQRInTerminal: !usePairingCode, // Selalu false karena kita handle di sini
+    auth: state,
+    generateHighQualityLinkPreview: true,
+    syncFullHistory: true,
+    browser: ["Ubuntu", "Chrome", "20.0.04"], // Sesuaikan dengan browser yang Anda inginkan
+    // Konfigurasi untuk pairing code
+  });
+
+  if (usePairingCode && !sock.authState.creds.registered) {
+    // Jika ada pairing code yang diberikan, kita set statusnya
+    pairingCodes[phoneNumber] = phoneNumber; // Simpan pairing code di memori
+    try {
+      const pairingCode = await sock.requestPairingCode(phoneNumber);
+
+      logger.info(`Pairing code set for ${phoneNumber}: ${pairingCode}`);
+      clientStatuses[phoneNumber] = "PAIRING_READY";
+      io.emit("pairing_code", {
+        phoneNumber,
+        code: pairingCode,
+        userId,
+        secretToken: sessionEntry.secretToken,
+      });
+    } catch (error) {
+      logger.error("Error requesting pairing code:", error);
+    }
+  }
+
+  clients[phoneNumber] = sock;
+  clientStatuses[phoneNumber] = "CONNECTING";
+
+  await User.updateOne(
+    { _id: userId, "whatsappSessions.phoneNumber": phoneNumber },
+    {
+      $set: {
+        "whatsappSessions.$.status": "CONNECTING",
+        "whatsappSessions.$.lastUpdated": Date.now(),
+      },
+    },
+  );
+  logger.info(`Baileys client instance created for ${phoneNumber}.`);
+
+  sock.ev.on("creds.update", saveCreds);
+
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    logger.info(`Connection Update for ${phoneNumber}: ${connection}`);
+
+    if (qr) {
+      // Ini akan ter-trigger HANYA JIKA usePairingCode = false
+      logger.info(`QR RECEIVED for ${phoneNumber}.`);
+      qrCodes[phoneNumber] = qr;
+      clientStatuses[phoneNumber] = "QR_READY";
+      io.emit("qr_code", {
+        phoneNumber,
+        qr,
+        userId,
+        secretToken: sessionEntry.secretToken,
+      });
+
+      if (qrTimeouts[phoneNumber]) clearTimeout(qrTimeouts[phoneNumber]);
+      qrTimeouts[phoneNumber] = setTimeout(
+        async () => {
+          if (clientStatuses[phoneNumber] !== "READY") {
+            logger.warn(`QR timeout for ${phoneNumber}. Destroying session.`);
+            await destroySession(phoneNumber, userId, io, "QR_TIMEOUT");
+          }
+        },
+        config.qrTimeoutMinutes * 60 * 1000,
+      );
+
+      User.updateOne(
+        { _id: userId, "whatsappSessions.phoneNumber": phoneNumber },
+        {
+          $set: {
+            "whatsappSessions.$.status": "QR_READY",
+            "whatsappSessions.$.lastUpdated": Date.now(),
+          },
+        },
+      ).exec();
+    }
+
+    if (connection === "close") {
+      const reason =
+        new Boom(lastDisconnect?.error)?.output?.statusCode ||
+        DisconnectReason.connectionClosed;
+      logger.error(
+        `Connection closed for ${phoneNumber}. Reason: ${reason}. Error: ${lastDisconnect?.error?.message || "Unknown"}`,
+      );
+
+      delete clients[phoneNumber];
+      delete qrCodes[phoneNumber]; // Hapus QR jika ada
+      delete pairingCodes[phoneNumber]; // Hapus Pairing Code jika ada
+
+      if (qrTimeouts[phoneNumber]) {
+        clearTimeout(qrTimeouts[phoneNumber]);
+        delete qrTimeouts[phoneNumber];
+      }
+
+      if (
+        reason === DisconnectReason.badSession ||
+        reason === DisconnectReason.loggedOut
+      ) {
+        clientStatuses[phoneNumber] = "AUTH_FAILURE";
+        io.emit("client_status", {
+          phoneNumber,
+          status: "AUTH_FAILURE",
+          message: lastDisconnect?.error?.message,
+          userId,
+          secretToken: sessionEntry.secretToken,
+        });
+        logger.warn(
+          `Authentication failure for ${phoneNumber}. Destroying session.`,
+        );
+        await destroySession(
+          phoneNumber,
+          userId,
+          io,
+          `AUTH_FAILURE: ${lastDisconnect?.error?.message || reason}`,
+        );
+      } else if (
+        reason === DisconnectReason.connectionClosed ||
+        reason === DisconnectReason.connectionLost
+      ) {
+        clientStatuses[phoneNumber] = "DISCONNECTED";
+        io.emit("client_status", {
+          phoneNumber,
+          status: "DISCONNECTED",
+          reason: "Connection Lost/Closed",
+          userId,
+          secretToken: sessionEntry.secretToken,
+        });
+        logger.info(
+          `Connection lost/closed for ${phoneNumber}. Attempting reconnect in 5 seconds...`,
+        );
+        setTimeout(() => {
+          createClient(userId, phoneNumber, io, usePairingCode).catch((e) =>
+            logger.error(
+              `Error during reconnect attempt for ${phoneNumber}: ${e.message}`,
+              e.stack,
+            ),
+          );
+        }, 5000);
+      } else {
+        clientStatuses[phoneNumber] = "ERROR";
+        io.emit("client_status", {
+          phoneNumber,
+          status: "ERROR",
+          message: lastDisconnect?.error?.message,
+          userId,
+          secretToken: sessionEntry.secretToken,
+        });
+        logger.error(
+          `Unhandled disconnection reason for ${phoneNumber}: ${lastDisconnect?.error?.message || reason}. Destroying session.`,
+        );
+        await destroySession(
+          phoneNumber,
+          userId,
+          io,
+          `UNHANDLED_DISCONNECT: ${lastDisconnect?.error?.message || reason}`,
+        );
+      }
+
+      await User.updateOne(
+        { _id: userId, "whatsappSessions.phoneNumber": phoneNumber },
+        {
+          $set: {
+            "whatsappSessions.$.status": clientStatuses[phoneNumber],
+            "whatsappSessions.$.lastUpdated": Date.now(),
+          },
+        },
+      );
+    } else if (connection === "open") {
+      if (sock.user) {
+        logger.info(
+          `Client ${phoneNumber} is READY! sock.user: ${sock.user.id.user}`,
+        );
+        clientStatuses[phoneNumber] = "READY";
+        delete qrCodes[phoneNumber];
+        delete pairingCodes[phoneNumber]; // <-- Hapus pairing code setelah terhubung
+        if (qrTimeouts[phoneNumber]) {
+          clearTimeout(qrTimeouts[phoneNumber]);
+          delete qrTimeouts[phoneNumber];
+        }
+        const info = {
+          pushname: sock.user.name,
+          number: sock.user.id.user,
         };
-    }
-    return statuses;
-}
+        io.emit("client_status", {
+          phoneNumber,
+          status: "READY",
+          userId,
+          secretToken: sessionEntry.secretToken,
+          info,
+        });
 
-// Fungsi untuk mengirim pesan, menggunakan senderPhoneNumber dari middleware
-async function sendMessage(senderPhoneNumber, targetNumber, message) { // userId tidak lagi dibutuhkan di sini
-    const client = clients[senderPhoneNumber];
-    if (!client || clientStatuses[senderPhoneNumber] !== 'READY') {
-        throw new Error(`Client for ${senderPhoneNumber} is not ready or does not exist. Status: ${clientStatuses[senderPhoneNumber] || 'Unknown'}`);
+        await User.updateOne(
+          { _id: userId, "whatsappSessions.phoneNumber": phoneNumber },
+          {
+            $set: {
+              "whatsappSessions.$.status": "READY",
+              "whatsappSessions.$.lastUpdated": Date.now(),
+            },
+          },
+        );
+      } else {
+        logger.error(
+          `sock.user is undefined after connection 'open' event for ${phoneNumber}!`,
+        );
+        await destroySession(phoneNumber, userId, io, "sock.user_UNDEFINED");
+      }
+    } else {
+      clientStatuses[phoneNumber] = connection?.toUpperCase();
+      User.updateOne(
+        { _id: userId, "whatsappSessions.phoneNumber": phoneNumber },
+        {
+          $set: {
+            "whatsappSessions.$.status": connection?.toUpperCase(),
+            "whatsappSessions.$.lastUpdated": Date.now(),
+          },
+        },
+      ).exec();
     }
+  });
 
-    const chatId = targetNumber.includes('@c.us') ? targetNumber : `${targetNumber}@c.us`;
-    try {
-        const result = await client.sendMessage(chatId, message);
-        return { success: true, id: result.id._serialized };
-    } catch (error) {
-        console.error(`Error sending message from ${senderPhoneNumber} to ${targetNumber}:`, error);
-        throw new Error(`Failed to send message: ${error.message}`);
-    }
-}
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (type === "notify") {
+      for (const msg of messages) {
+        if (
+          msg.key.fromMe ||
+          isJidGroup(msg.key.remoteJid) ||
+          isJidBroadcast(msg.key.remoteJid)
+        ) {
+          continue;
+        }
 
-// Fungsi untuk mengirim media, menggunakan senderPhoneNumber dari middleware
-async function sendMedia(senderPhoneNumber, targetNumber, filePath, caption = '') { // userId tidak lagi dibutuhkan di sini
-    const client = clients[senderPhoneNumber];
-    if (!client || clientStatuses[senderPhoneNumber] !== 'READY') {
-        throw new Error(`Client for ${senderPhoneNumber} is not ready or does not exist. Status: ${clientStatuses[senderPhoneNumber] || 'Unknown'}`);
-    }
+        const senderJid = msg.key.remoteJid;
+        const messageText =
+          msg.message?.conversation ||
+          msg.message?.extendedTextMessage?.text ||
+          "";
 
-    const chatId = targetNumber.includes('@c.us') ? targetNumber : `${targetNumber}@c.us`;
-    try {
-        const media = MessageMedia.fromFilePath(filePath);
-        const result = await client.sendMessage(chatId, media, { caption: caption });
-        return { success: true, id: result.id._serialized };
-    } catch (error) {
-        console.error(`Error sending media from ${senderPhoneNumber} to ${targetNumber}:`, error);
-        throw new Error(`Failed to send media: ${error.message}`);
+        logger.info(
+          `New message from ${senderJid} on ${phoneNumber}: ${messageText}`,
+        );
+        io.emit("new_message", {
+          phoneNumber,
+          message: messageText,
+          from: senderJid,
+          userId,
+          secretToken: sessionEntry.secretToken,
+        });
+
+        if (messageText.toLowerCase() === "halo") {
+          await sock.sendMessage(senderJid, {
+            text: "Halo kembali! Ini adalah balasan otomatis dari sistem.",
+          });
+          logger.info(
+            `Auto-replied "Halo kembali!" to ${senderJid} from ${phoneNumber}.`,
+          );
+        } else if (messageText.toLowerCase() === "!status") {
+          const statusText = `Status: Connected as ${sock.user.name || sock.user.id.user} on ${phoneNumber}.`;
+          await sock.sendMessage(senderJid, { text: statusText });
+          logger.info(
+            `Auto-replied status to ${senderJid} from ${phoneNumber}.`,
+          );
+        }
+      }
     }
+  });
+
+  sock.ev.on("messages.delete", async (item) => {
+    logger.info(`Message deleted event for ${phoneNumber}:`, item);
+  });
+
+  return {
+    success: true,
+    message: "Client initialization started.",
+    sessionToken: sessionEntry.secretToken,
+  };
 }
 
 // Fungsi untuk memuat ulang semua sesi yang sudah ada saat server restart
 async function restoreSessions(io) {
-    console.log("Starting session restoration process...");
-    const sessionDirs = await fs.readdir(config.sessionDir);
-    const allUsers = await User.find({});
+  logger.info("Starting session restoration process with Baileys...");
+  await fs.ensureDir(SESSIONS_DIR);
 
-    for (const dir of sessionDirs) {
-        if (dir.startsWith('session_')) {
-            const phoneNumber = dir.replace('session_', '');
-            console.log(`Checking existing session folder for: ${phoneNumber}`);
+  const allUsers = await User.find({});
 
-            // Coba temukan user dan sessionEntry di database
-            let foundUserId = null;
-            let foundSessionEntry = null;
-            for (const user of allUsers) {
-                const session = user.whatsappSessions.find(s => s.phoneNumber === phoneNumber);
-                if (session) {
-                    foundUserId = user._id;
-                    foundSessionEntry = session;
-                    break;
-                }
-            }
+  for (const user of allUsers) {
+    for (const sessionEntry of user.whatsappSessions) {
+      const phoneNumber = sessionEntry.phoneNumber;
+      const sessionPath = path.join(SESSIONS_DIR, phoneNumber);
 
-            if (!foundUserId || !foundSessionEntry) {
-                console.warn(`Session folder for ${phoneNumber} found but no associated user/entry in DB. Removing orphaned session.`);
-                await fs.remove(path.join(config.sessionDir, dir)); // Hapus folder sesi yang "yatim"
-                continue;
-            }
-
-            console.log(`Attempting to restore session for ${phoneNumber} (owned by user ${foundUserId})...`);
-
-            const client = new Client({
-                authStrategy: new LocalAuth({
-                    clientId: phoneNumber,
-                    dataPath: path.join(config.sessionDir, dir)
-                }),
-                puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'] }
-            });
-
-            clients[phoneNumber] = client;
-            clientStatuses[phoneNumber] = 'LOADING'; // Set status awal saat restore
-            // Update status di DB saat restore
-            await User.updateOne(
-                { _id: foundUserId, 'whatsappSessions.phoneNumber': phoneNumber },
-                { '$set': { 'whatsappSessions.$.status': 'LOADING', 'whatsappSessions.$.lastUpdated': Date.now() } }
-            );
-
-            // Set event listeners untuk klien yang dipulihkan
-            client.on('qr', qr => {
-                console.log(`QR RECEIVED for ${phoneNumber} (restored):`, qr);
-                qrCodes[phoneNumber] = qr;
-                clientStatuses[phoneNumber] = 'QR_READY';
-                io.emit('qr_code', { phoneNumber, qr, userId: foundUserId, secretToken: foundSessionEntry.secretToken, restored: true });
-
-                // Mulai timer QR untuk sesi yang dipulihkan jika masih QR_READY
-                qrTimeouts[phoneNumber] = setTimeout(async () => {
-                    if (clientStatuses[phoneNumber] !== 'READY') {
-                        await destroySession(phoneNumber, foundUserId, io, 'QR_TIMEOUT_RESTORED');
-                        console.log(`Restored session for ${phoneNumber} removed due to QR timeout.`);
-                    }
-                }, config.qrTimeoutMinutes * 60 * 1000);
-
-                 User.updateOne(
-                    { _id: foundUserId, 'whatsappSessions.phoneNumber': phoneNumber },
-                    { '$set': { 'whatsappSessions.$.status': 'QR_READY', 'whatsappSessions.$.lastUpdated': Date.now() } }
-                ).exec();
-            });
-
-            client.on('ready', async () => {
-                console.log(`Client ${phoneNumber} (restored) is ready!`);
-                clientStatuses[phoneNumber] = 'READY';
-                delete qrCodes[phoneNumber];
-                if (qrTimeouts[phoneNumber]) {
-                    clearTimeout(qrTimeouts[phoneNumber]);
-                    delete qrTimeouts[phoneNumber];
-                }
-                io.emit('client_status', { phoneNumber, status: 'READY', userId: foundUserId, secretToken: foundSessionEntry.secretToken, restored: true });
-
-                await User.updateOne(
-                    { _id: foundUserId, 'whatsappSessions.phoneNumber': phoneNumber },
-                    { '$set': { 'whatsappSessions.$.status': 'READY', 'whatsappSessions.$.lastUpdated': Date.now() } }
-                );
-            });
-
-            client.on('message', async msg => {
-                console.log(`MESSAGE from ${phoneNumber} (restored):`, msg.body);
-                io.emit('new_message', { phoneNumber, message: msg.body, from: msg.from, userId: foundUserId, secretToken: foundSessionEntry.secretToken });
-                if (msg.body.toLowerCase() === 'halo') { msg.reply('Halo kembali!'); }
-            });
-
-            client.on('disconnected', async (reason) => {
-                console.log(`Client ${phoneNumber} (restored) was disconnected:`, reason);
-                clientStatuses[phoneNumber] = 'DISCONNECTED';
-                io.emit('client_status', { phoneNumber, status: 'DISCONNECTED', reason, userId: foundUserId, secretToken: foundSessionEntry.secretToken, restored: true });
-
-                if (qrTimeouts[phoneNumber]) {
-                    clearTimeout(qrTimeouts[phoneNumber]);
-                    delete qrTimeouts[phoneNumber];
-                }
-                delete clients[phoneNumber];
-                delete qrCodes[phoneNumber];
-
-                await User.updateOne(
-                    { _id: foundUserId, 'whatsappSessions.phoneNumber': phoneNumber },
-                    { '$set': { 'whatsappSessions.$.status': 'DISCONNECTED', 'whatsappSessions.$.lastUpdated': Date.now() } }
-                );
-            });
-
-            client.on('auth_failure', async msg => {
-                console.error(`Authentication failure for ${phoneNumber} (restored):`, msg);
-                clientStatuses[phoneNumber] = 'AUTH_FAILURE';
-                io.emit('client_status', { phoneNumber, status: 'AUTH_FAILURE', message: msg, userId: foundUserId, secretToken: foundSessionEntry.secretToken });
-                await destroySession(phoneNumber, foundUserId, io, 'AUTH_FAILURE_RESTORED');
-            });
-
-            client.on('change_state', state => {
-                console.log(`Client ${phoneNumber} (restored) state changed:`, state);
-                io.emit('client_status', { phoneNumber, status: `STATE_${state}`, userId: foundUserId, secretToken: foundSessionEntry.secretToken });
-                User.updateOne(
-                    { _id: foundUserId, 'whatsappSessions.phoneNumber': phoneNumber },
-                    { '$set': { 'whatsappSessions.$.status': `STATE_${state}`, 'whatsappSessions.$.lastUpdated': Date.now() } }
-                ).exec();
-            });
-
-            try {
-                await client.initialize();
-            } catch (error) {
-                console.error(`Error restoring client for ${phoneNumber}:`, error);
-                clientStatuses[phoneNumber] = 'ERROR';
-                await destroySession(phoneNumber, foundUserId, io, `INITIALIZATION_ERROR_RESTORED: ${error.message}`);
-            }
+      // Cek apakah direktori sesi untuk nomor ini ada di disk
+      // Jika ada, kita asumsikan sesi valid dan mencoba restore.
+      // Tidak perlu usePairingCode di sini karena ini restore sesi yang sudah ada.
+      if ((await fs.pathExists(sessionPath)) && !clients[phoneNumber]) {
+        logger.info(
+          `Attempting to restore session for ${phoneNumber} from disk (owned by user ${user._id})...`,
+        );
+        try {
+          await createClient(user._id, phoneNumber, io, true); // false = tidak pakai pairing code saat restore
+          logger.info(`Restore process initiated for ${phoneNumber}.`);
+        } catch (error) {
+          logger.error(
+            `Error during restore for ${phoneNumber}: ${error.message}`,
+            error.stack,
+          );
+          await destroySession(
+            phoneNumber,
+            user._id,
+            io,
+            `RESTORE_FAILED: ${error.message}`,
+          );
         }
+      } else if (!(await fs.pathExists(sessionPath))) {
+        logger.warn(
+          `Skipping restore for ${phoneNumber}: Session directory not found at ${sessionPath}. Consider destroying this session entry from DB.`,
+        );
+      } else if (clients[phoneNumber]) {
+        logger.info(
+          `Session for ${phoneNumber} already in memory. Skipping restore.`,
+        );
+      }
     }
-    console.log("Session restoration process completed.");
+  }
+  logger.info("Session restoration process completed.");
+}
+
+// Fungsi baru untuk mendapatkan pairing code
+function getPairingCode(phoneNumber) {
+  return pairingCodes[phoneNumber];
+}
+
+// Fungsi untuk mendapatkan status klien, disaring berdasarkan pengguna
+async function getClientStatusForUser(userId) {
+  const user = await User.findById(userId);
+  if (!user) return {};
+
+  const statuses = {};
+  for (const session of user.whatsappSessions) {
+    const phoneNumber = session.phoneNumber;
+    const sock = clients[phoneNumber]; // Ambil instance Baileys dari cache memori
+    const info =
+      sock && sock.user
+        ? {
+            pushname: sock.user.name,
+            number: sock.user.id.user,
+          }
+        : null;
+
+    statuses[phoneNumber] = {
+      status: clientStatuses[phoneNumber] || session.status || "NOT_FOUND",
+      qr: qrCodes[phoneNumber] || null,
+      info: info,
+      secretToken: session.secretToken,
+    };
+  }
+  return statuses;
+}
+
+// Fungsi untuk mengirim pesan teks
+async function sendMessage(senderPhoneNumber, targetNumber, message) {
+  const sock = clients[senderPhoneNumber];
+  if (!sock || clientStatuses[senderPhoneNumber] !== "READY") {
+    throw new Error(
+      `Client for ${senderPhoneNumber} is not ready or does not exist. Status: ${clientStatuses[senderPhoneNumber] || "Unknown"}`,
+    );
+  }
+
+  const jid = jidNormalizedUser(`${targetNumber}@s.whatsapp.net`); // Baileys menggunakan format ini
+  try {
+    const result = await sock.sendMessage(jid, { text: message });
+    return { success: true, id: result.key.id };
+  } catch (error) {
+    console.error(
+      `Error sending message from ${senderPhoneNumber} to ${targetNumber}:`,
+      error,
+    );
+    throw new Error(`Failed to send message: ${error.message}`);
+  }
+}
+
+// Fungsi untuk mengirim media (belum lengkap, perlu penanganan file yang diupload ke server)
+async function sendMedia(
+  senderPhoneNumber,
+  targetNumber,
+  filePath,
+  caption = "",
+) {
+  const sock = clients[senderPhoneNumber];
+  if (!sock || clientStatuses[senderPhoneNumber] !== "READY") {
+    throw new Error(
+      `Client for ${senderPhoneNumber} is not ready or does not exist. Status: ${clientStatuses[senderPhoneNumber] || "Unknown"}`,
+    );
+  }
+
+  const jid = jidNormalizedUser(`${targetNumber}@s.whatsapp.net`);
+
+  // Ini hanya contoh, Anda perlu mekanisme upload/streaming file yang sebenarnya
+  // Jika filePath adalah URL, Anda mungkin perlu mengunduhnya dulu
+  // atau jika filePath adalah path lokal, pastikan itu bisa diakses oleh server Baileys
+  try {
+    let messageType;
+    let mediaContent;
+
+    if (filePath.endsWith(".mp4") || filePath.endsWith(".mov")) {
+      messageType = "video";
+      mediaContent = { video: { url: filePath }, caption: caption };
+    } else if (
+      filePath.endsWith(".jpg") ||
+      filePath.endsWith(".jpeg") ||
+      filePath.endsWith(".png")
+    ) {
+      messageType = "image";
+      mediaContent = { image: { url: filePath }, caption: caption };
+    } else {
+      messageType = "document"; // Contoh untuk jenis file lain
+      mediaContent = {
+        document: { url: filePath, mimetype: "application/octet-stream" },
+        fileName: path.basename(filePath),
+      };
+    }
+
+    const result = await sock.sendMessage(jid, mediaContent);
+    return { success: true, id: result.key.id };
+  } catch (error) {
+    console.error(
+      `Error sending media from ${senderPhoneNumber} to ${targetNumber}:`,
+      error,
+    );
+    throw new Error(`Failed to send media: ${error.message}`);
+  }
 }
 
 module.exports = {
-    createClient,
-    getClientStatusForUser,
-    sendMessage,
-    sendMedia,
-    restoreSessions,
-    destroySession // Export juga untuk penggunaan di controller jika perlu
+  createClient,
+  getClientStatusForUser,
+  sendMessage,
+  sendMedia,
+  restoreSessions,
+  destroySession,
 };

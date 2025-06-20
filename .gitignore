@@ -3,3 +3,4 @@ node_modules
 backend/logs
 backend/logs
 backend/logs
+backend/whatsapp_sessions

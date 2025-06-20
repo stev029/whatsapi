@@ -10,7 +10,6 @@ const {
   isJidGroup, // Untuk memeriksa apakah JID adalah grup
   makeInMemoryStore, // Berguna untuk menyimpan data chat sementara jika Anda mau
 } = require("baileys");
-const axios = require("axios")
 const { Boom } = require("@hapi/boom");
 const pino = require("pino");
 const path = require("path");
@@ -26,10 +25,9 @@ const qrCodes = {}; // { phoneNumber: qrData }
 const pairingCodes = {}; // { phoneNumber: pairingCode } <-- Tambahkan ini
 const clientStatuses = {}; // { phoneNumber: 'CONNECTING' | 'QR_READY' | 'PAIRING_READY' | 'READY' | 'LOGOUT' | 'CLOSED' | 'AUTH_FAILURE' | 'ERROR' | 'DISCONNECTED' }
 const qrTimeouts = {}; // { phoneNumber: TimeoutInstance }
-const attemptReconnect = {};
 
 // Baileys logger
-const loggerBaileys = pino({ level: "info" });
+const loggerBaileys = pino({ level: "info", stream: process.stdout });
 
 // Lokasi penyimpanan sesi Baileys
 const SESSIONS_DIR = path.resolve(__dirname, "../../whatsapp_sessions");
@@ -39,35 +37,6 @@ function generateSessionToken(userId, phoneNumber) {
   return jwt.sign({ userId, phoneNumber }, config.sessionSecret, {
     expiresIn: "1y",
   });
-}
-
-// Fungsi untuk mengirim data ketika ada pesan masuk
-async function sendWebhook(url, data) {
-  if (!url) {
-    logger.warn('Webhook URL not set. Skipping webhook.');
-    return;
-  }
-  try {
-    logger.info(`Sending webhook to: ${url}`);
-    await axios.post(url, data, {
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      timeout: 5000 // Timeout 5 detik
-    });
-    logger.info('Webhook sent successfully.');
-  } catch (error) {
-    logger.error(`Failed to send webhook to ${url}: ${error.message}`);
-    // Log respons error jika ada
-    if (error.response) {
-      logger.error(`Webhook error response status: ${error.response.status}`);
-      logger.error(`Webhook error response data: ${JSON.stringify(error.response.data)}`);
-    } else if (error.request) {
-      logger.error('No response received for webhook request.');
-    } else {
-      logger.error('Error setting up webhook request.');
-    }
-  }
 }
 
 // Fungsi untuk menghapus sesi secara paksa (dari memori, DB, dan disk)
@@ -147,9 +116,6 @@ async function destroySession(phoneNumber, userId, io, reason = "Timeout") {
 // Fungsi untuk membuat dan menginisialisasi klien Baileys baru
 // Tambahkan parameter `usePairingCode`
 async function createClient(userId, phoneNumber, io, usePairingCode = true) {
-  if (!attemptReconnect[phoneNumber]) {
-    attemptReconnect[phoneNumber] = 0
-  }
   logger.info(
     `Attempting to create/restore client for ${phoneNumber} (User ID: ${userId}). Via Pairing Code: ${usePairingCode}.`,
   );
@@ -250,28 +216,21 @@ async function createClient(userId, phoneNumber, io, usePairingCode = true) {
 
   if (usePairingCode && !sock.authState.creds.registered) {
     // Jika ada pairing code yang diberikan, kita set statusnya
-    new Promise(async () => {
-      for (i = 0; i < 5; i++) {
-        try {
-          await new Promise(res => setTimeout(res, 1000))
-          const pairingCode = await sock.requestPairingCode(phoneNumber);
+    pairingCodes[phoneNumber] = phoneNumber; // Simpan pairing code di memori
+    try {
+      const pairingCode = await sock.requestPairingCode(phoneNumber);
 
-          logger.info(`Pairing code set for ${phoneNumber}: ${pairingCode}`);
-          clientStatuses[phoneNumber] = "PAIRING_READY";
-          pairingCodes[phoneNumber] = pairingCode; // Simpan pairing code di memori
-
-          io.emit("pairing_code", {
-            phoneNumber,
-            code: pairingCode,
-            userId,
-            secretToken: sessionEntry.secretToken,
-          });
-          break;
-        } catch (error) {
-          logger.error("Error requesting pairing code:", error);
-        }
-      }
-    })
+      logger.info(`Pairing code set for ${phoneNumber}: ${pairingCode}`);
+      clientStatuses[phoneNumber] = "PAIRING_READY";
+      io.emit("pairing_code", {
+        phoneNumber,
+        code: pairingCode,
+        userId,
+        secretToken: sessionEntry.secretToken,
+      });
+    } catch (error) {
+      logger.error("Error requesting pairing code:", error);
+    }
   }
 
   clients[phoneNumber] = sock;
@@ -378,6 +337,17 @@ async function createClient(userId, phoneNumber, io, usePairingCode = true) {
           userId,
           secretToken: sessionEntry.secretToken,
         });
+        logger.info(
+          `Connection lost/closed for ${phoneNumber}. Attempting reconnect in 5 seconds...`,
+        );
+        setTimeout(() => {
+          createClient(userId, phoneNumber, io, usePairingCode).catch((e) =>
+            logger.error(
+              `Error during reconnect attempt for ${phoneNumber}: ${e.message}`,
+              e.stack,
+            ),
+          );
+        }, 5000);
       } else {
         clientStatuses[phoneNumber] = "ERROR";
         io.emit("client_status", {
@@ -390,40 +360,13 @@ async function createClient(userId, phoneNumber, io, usePairingCode = true) {
         logger.error(
           `Unhandled disconnection reason for ${phoneNumber}: ${lastDisconnect?.error?.message || reason}. Destroying session.`,
         );
-
-        // await destroySession(
-        //   phoneNumber,
-        //   userId,
-        //   io,
-        //   `UNHANDLED_DISCONNECT: ${lastDisconnect?.error?.message || reason}`,
-        // );
-      }
-
-      if (attemptReconnect[phoneNumber] < 5) {
-        logger.info(
-          `Connection lost/closed for ${phoneNumber}. Attempting reconnect in 5 seconds...`,
-        );
-        setTimeout(() => {
-          createClient(userId, phoneNumber, io, usePairingCode).catch((e) =>
-            logger.error(
-              `Error during reconnect attempt for ${phoneNumber}: ${e.message}`,
-              e.stack,
-            ),
-          );
-          attemptReconnect[phoneNumber]++
-          logger.info(`Attempting reconnect ${attemptReconnect[phoneNumber]}`)
-        }, 5000);
-      } else {
-        logger.error(`Error: Failure reconnecting attempt ${attemptReconnect[phoneNumber]}`)
-        io.emit('client_status', {
+        await destroySession(
           phoneNumber,
-          status: "ERROR",
-          message: `Failure reconnect attempt ${attemptReconnect[phoneNumber]}. Please contact administrator`,
           userId,
-          secretToken: sessionEntry.secretToken
-        })
+          io,
+          `UNHANDLED_DISCONNECT: ${lastDisconnect?.error?.message || reason}`,
+        );
       }
-
 
       await User.updateOne(
         { _id: userId, "whatsappSessions.phoneNumber": phoneNumber },
@@ -491,7 +434,7 @@ async function createClient(userId, phoneNumber, io, usePairingCode = true) {
     if (type === "notify") {
       for (const msg of messages) {
         if (
-          // msg.key.fromMe ||
+          msg.key.fromMe ||
           isJidGroup(msg.key.remoteJid) ||
           isJidBroadcast(msg.key.remoteJid)
         ) {
@@ -507,27 +450,6 @@ async function createClient(userId, phoneNumber, io, usePairingCode = true) {
         logger.info(
           `New message from ${senderJid} on ${phoneNumber}: ${messageText}`,
         );
-
-        // Mengambil webhookUrl dari database
-        const currentUser = await User.findById(userId);
-        const currentSession = currentUser?.whatsappSessions.find(s => s.phoneNumber === phoneNumber);
-        const webhookUrl = currentSession?.webhookUrl;
-
-        if (webhookUrl) {
-          const webhookData = {
-            event: 'new_message',
-            phoneNumber: phoneNumber, // Nomor WhatsApp yang menerima pesan
-            from: senderJid, // Pengirim pesan
-            message: messageText, // Isi pesan
-            messageObject: msg, // Objek pesan lengkap dari Baileys
-            timestamp: Date.now(),
-            userId: userId
-          };
-          await sendWebhook(webhookUrl, webhookData);
-        } else {
-          logger.info(`No webhook URL configured for ${phoneNumber}. Skipping webhook delivery.`);
-        }
-
         io.emit("new_message", {
           phoneNumber,
           message: messageText,
@@ -618,32 +540,6 @@ function getPairingCode(phoneNumber) {
   return pairingCodes[phoneNumber];
 }
 
-async function setWebhookUrl(userId, phoneNumber, webhookUrl) {
-  try {
-    // Cek apakah URL valid (contoh sederhana)
-    if (webhookUrl && !/^https?:\/\//i.test(webhookUrl)) {
-      throw new Error('Invalid webhook URL format. Must start with http:// or https://');
-    }
-
-    const result = await User.updateOne(
-      { _id: userId, 'whatsappSessions.phoneNumber': phoneNumber },
-      { '$set': { 'whatsappSessions.$.webhookUrl': webhookUrl } }
-    );
-
-    if (result.matchedCount === 0) {
-      return { success: false, message: 'WhatsApp session not found for this user.' };
-    }
-    if (result.modifiedCount === 0) {
-      return { success: true, message: 'Webhook URL not changed (already set to the same value or no update needed).' };
-    }
-    logger.info(`Webhook URL for ${phoneNumber} set to: ${webhookUrl || 'null'}.`);
-    return { success: true, message: 'Webhook URL updated successfully.' };
-  } catch (error) {
-    logger.error(`Error setting webhook URL for ${phoneNumber}: ${error.message}`, error.stack);
-    throw error;
-  }
-}
-
 // Fungsi untuk mendapatkan status klien, disaring berdasarkan pengguna
 async function getClientStatusForUser(userId) {
   const user = await User.findById(userId);
@@ -656,9 +552,9 @@ async function getClientStatusForUser(userId) {
     const info =
       sock && sock.user
         ? {
-          pushname: sock.user.name,
-          number: sock.user.id.user,
-        }
+            pushname: sock.user.name,
+            number: sock.user.id.user,
+          }
         : null;
 
     statuses[phoneNumber] = {
@@ -748,8 +644,6 @@ async function sendMedia(
 module.exports = {
   createClient,
   getClientStatusForUser,
-  getPairingCode,
-  setWebhookUrl,
   sendMessage,
   sendMedia,
   restoreSessions,

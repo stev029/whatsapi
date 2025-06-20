@@ -26,36 +26,6 @@ exports.addSession = async (req, res) => {
     }
 };
 
-exports.setWebhook = async (req, res, next) => {
-    const { phoneNumber, webhoobUrl } = req.body;
-    const userId = req.user.id; // Dari token JWT
-
-    if (!phoneNumber) {
-        return res.status(400).json({ error: 'Phone number is required.' });
-    }
-    // webhookUrl bisa null/kosong untuk menghapus webhook
-    if (webhookUrl && typeof webhookUrl !== 'string') {
-        return res.status(400).json({ error: 'Webhook URL must be a string or null.' });
-    }
-
-    const cleanPhoneNumber = phoneNumber.replace(/[^0-9]/g, '');
-
-    try {
-        // Pastikan user memiliki sesi WhatsApp ini
-        const user = await User.findById(userId);
-        const sessionExists = user.whatsappSessions.some(s => s.phoneNumber === cleanPhoneNumber);
-        if (!sessionExists) {
-            return res.status(403).json({ error: 'You do not own this WhatsApp session.' });
-        }
-
-        const result = await whatsappService.setWebhookUrl(userId, cleanPhoneNumber, webhookUrl || null);
-        res.status(200).json(result);
-    } catch (error) {
-        logger.error(`Error setting webhook URL for ${cleanPhoneNumber}: ${error.message}`, error.stack);
-        next(error);
-    }
-};
-
 exports.getUserSessionsStatus = async (req, res) => { // Pastikan async
     const userId = req.user._id;
     const status = await whatsappService.getClientStatusForUser(userId); // Panggil async

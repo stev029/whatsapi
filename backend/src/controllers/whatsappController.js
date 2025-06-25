@@ -70,7 +70,8 @@ exports.getUserSessionsStatus = async (req, res, next) => {
 
 // Endpoint untuk mengirim pesan (tidak perlu senderPhoneNumber di body)
 exports.sendMessage = async (req, res, next) => {
-    const { senderPhoneNumber, targetNumber, message } = req.body;
+    const { targetNumber, message } = req.body;
+    const { senderPhoneNumber } = req; // Diambil dari authenticateSession
 
     if (!senderPhoneNumber || !targetNumber || !message) {
         return res.status(400).json({ error: 'Sender phone number, target number, and message are required.' });

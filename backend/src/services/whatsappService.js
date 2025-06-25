@@ -476,7 +476,7 @@ async function restoreSessions(io) {
 // Fungsi untuk mengirim data ke webhook URL
 async function sendWebhook(webhookUrl, data) {
   try {
-    const response = await axios.get(webhookUrl, data, {
+    const response = await axios.post(webhookUrl, data, {
       headers: {
         'Content-Type': 'application/json',
       },

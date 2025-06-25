@@ -1,6 +1,7 @@
 // src/controllers/whatsappController.js
 const whatsappService = require('../services/whatsappService');
 const User = require("../models/User");
+const logger = require("../config/logger");
 
 exports.addSession = async (req, res, next) => {
     const { phoneNumber, usePairingCode } = req.body; // Terima usePairingCode dari frontend

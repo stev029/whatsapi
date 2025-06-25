@@ -24,7 +24,7 @@ app.use(morgan('combined', { stream: logger.stream })); // <--- Tambahkan ini
 app.use(express.json()); // Body parser untuk JSON
 
 // Rute
-app.use('/auth', authRoutes);
+app.use('/api/auth', authRoutes);
 app.use('/whatsapp', whatsappRoutes);
 
 // Basic route

@@ -4,7 +4,7 @@ const API_BASE_URL = 'http://localhost:3000'; // Ganti jika backend Anda di port
 
 // Fungsi helper untuk menambahkan header Authorization
 const getAuthHeaders = () => {
-    const token = localStorage.getItem('userToken');
+    const token = localStorage.getItem('token');
     return {
         headers: {
             Authorization: `Bearer ${token}`
@@ -16,7 +16,7 @@ const getAuthHeaders = () => {
 const getSessionHeaders = (sessionToken) => {
     return {
         headers: {
-            Authorization: `Bearer ${localStorage.getItem('userToken')}`,
+            Authorization: `Bearer ${localStorage.getItem('token')}`,
             'X-Session-Token': sessionToken
         }
     };

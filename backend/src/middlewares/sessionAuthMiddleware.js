@@ -12,21 +12,7 @@ async function authenticateSessionToken(req, res, next) {
 
     try {
         const decoded = jwt.verify(sessionToken, config.sessionSecret);
-        const { userId, phoneNumber } = decoded;
-
-        // VERIFIKASI UTAMA: Pastikan userId dari sessionToken cocok dengan userId dari JWT pengguna utama
-        // Ini adalah validasi kepemilikan ganda
-        if (!req.user || req.user._id.toString() !== userId) { // req.user._id datang dari authMiddleware
-            return res.status(403).json({ error: 'User does not own this session token.' });
-        }
-
-        // Pastikan user dan sesi masih valid di database
-        const user = req.user; // Gunakan objek user yang sudah dimuat oleh authMiddleware
-        const sessionEntry = user.whatsappSessions.find(s => s.phoneNumber === phoneNumber && s.secretToken === sessionToken);
-        if (!sessionEntry) {
-            return res.status(403).json({ error: 'Invalid or expired session token, or session not found for this user.' });
-        }
-
+        const { phoneNumber } = decoded;
         req.senderPhoneNumber = phoneNumber; // Tambahkan senderPhoneNumber ke request
         next();
     } catch (error) {

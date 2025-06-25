@@ -26,12 +26,6 @@ exports.addSession = async (req, res, next) => {
     }
 };
 
-<<<<<<< HEAD
-exports.getUserSessionsStatus = async (req, res) => { // Pastikan async
-    const userId = req.user._id;
-    const status = await whatsappService.getClientStatusForUser(userId); // Panggil async
-    res.status(200).json(status);
-=======
 exports.setWebhook = async (req, res, next) => {
     const { phoneNumber, webhookUrl } = req.body;
     const userId = req.user.id; // Dari token JWT
@@ -71,7 +65,6 @@ exports.getUserSessionsStatus = async (req, res, next) => {
         logger.error(`Error getting client status for user ${userId}: ${error.message}`, error.stack);
         next(error);
     }
->>>>>>> v1
 };
 
 // Endpoint untuk mengirim pesan (tidak perlu senderPhoneNumber di body)
@@ -154,8 +147,6 @@ exports.deleteSession = async (req, res, next) => {
         logger.error(`Error deleting session for ${cleanPhoneNumber}: ${error.message}`, error.stack);
         next(error);
     }
-<<<<<<< HEAD
-=======
 };
 
 exports.requestSessionCode = async (req, res) => {
@@ -182,5 +173,4 @@ exports.requestSessionCode = async (req, res) => {
         console.error('Error requesting session code:', error);
         res.status(500).json({ error: 'Internal server error while requesting session code.' });
     }
->>>>>>> v1
 };

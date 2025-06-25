@@ -19,14 +19,6 @@ const config = require("../config");
 const User = require("../models/User");
 const logger = require("../config/logger");
 
-<<<<<<< HEAD
-// Objek untuk menyimpan semua klien Baileys yang aktif
-const clients = {}; // { phoneNumber: BaileysSocketInstance }
-const qrCodes = {}; // { phoneNumber: qrData }
-const pairingCodes = {}; // { phoneNumber: pairingCode } <-- Tambahkan ini
-const clientStatuses = {}; // { phoneNumber: 'CONNECTING' | 'QR_READY' | 'PAIRING_READY' | 'READY' | 'LOGOUT' | 'CLOSED' | 'AUTH_FAILURE' | 'ERROR' | 'DISCONNECTED' }
-const qrTimeouts = {}; // { phoneNumber: TimeoutInstance }
-=======
 // --- Constants ---
 const SESSIONS_DIR = path.resolve(__dirname, "../../whatsapp_sessions");
 const MAX_RECONNECT_ATTEMPTS = 5;
@@ -47,7 +39,6 @@ const QR_TIMEOUT_MINUTES = config.qrTimeoutMinutes || 1;
  * }>}
  */
 const sessions = new Map();
->>>>>>> v1
 
 // Baileys logger
 const loggerBaileys = pino({ level: "info", stream: process.stdout });
@@ -127,10 +118,6 @@ async function destroySession(phoneNumber, userId, io, reason = "Timeout") {
     });
 }
 
-<<<<<<< HEAD
-// Fungsi untuk membuat dan menginisialisasi klien Baileys baru
-// Tambahkan parameter `usePairingCode`
-=======
 // Fungsi untuk mendapatkan pairing code
 async function getPairingCode(phoneNumber, io) {
   const session = sessions.get(phoneNumber);
@@ -159,7 +146,6 @@ async function getPairingCode(phoneNumber, io) {
   return session.pairingCode
 }
 
->>>>>>> v1
 async function createClient(userId, phoneNumber, io, usePairingCode = true) {
   logger.info(
     `Attempting to create/restore client for ${phoneNumber} (User ID: ${userId}). Via Pairing Code: ${usePairingCode}.`,
@@ -242,227 +228,18 @@ async function createClient(userId, phoneNumber, io, usePairingCode = true) {
     auth: state,
     generateHighQualityLinkPreview: true,
     syncFullHistory: true,
-<<<<<<< HEAD
-    // browser: ["Ubuntu", "Chrome", "20.0.04"], // Sesuaikan dengan browser yang Anda inginkan
-    // Konfigurasi untuk pairing code
-=======
     browser: ["Ubuntu", "Chrome", "20.0.04"],
->>>>>>> v1
   });
 
   session.sock = sock;
 
   if (usePairingCode && !sock.authState.creds.registered) {
-<<<<<<< HEAD
-    // Jika ada pairing code yang diberikan, kita set statusnya
-    pairingCodes[phoneNumber] = phoneNumber; // Simpan pairing code di memori
-    try {
-      const pairingCode = await sock.requestPairingCode(phoneNumber);
-
-      logger.info(`Pairing code set for ${phoneNumber}: ${pairingCode}`);
-      clientStatuses[phoneNumber] = "PAIRING_READY";
-      io.emit("pairing_code", {
-        phoneNumber,
-        code: pairingCode,
-        userId,
-        secretToken: sessionEntry.secretToken,
-      });
-    } catch (error) {
-      logger.error("Error requesting pairing code:", error);
-    }
-=======
     getPairingCode(phoneNumber, io)
->>>>>>> v1
   }
 
   // --- 6. Attach Event Handlers ---
   sock.ev.on("creds.update", saveCreds);
-<<<<<<< HEAD
-
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    logger.info(`Connection Update for ${phoneNumber}: ${connection}`);
-
-    if (qr) {
-      // Ini akan ter-trigger HANYA JIKA usePairingCode = false
-      logger.info(`QR RECEIVED for ${phoneNumber}.`);
-      qrCodes[phoneNumber] = qr;
-      clientStatuses[phoneNumber] = "QR_READY";
-      io.emit("qr_code", {
-        phoneNumber,
-        qr,
-        userId,
-        secretToken: sessionEntry.secretToken,
-      });
-
-      if (qrTimeouts[phoneNumber]) clearTimeout(qrTimeouts[phoneNumber]);
-      qrTimeouts[phoneNumber] = setTimeout(
-        async () => {
-          if (clientStatuses[phoneNumber] !== "READY") {
-            logger.warn(`QR timeout for ${phoneNumber}. Destroying session.`);
-            await destroySession(phoneNumber, userId, io, "QR_TIMEOUT");
-          }
-        },
-        config.qrTimeoutMinutes * 60 * 1000,
-      );
-
-      User.updateOne(
-        { _id: userId, "whatsappSessions.phoneNumber": phoneNumber },
-        {
-          $set: {
-            "whatsappSessions.$.status": "QR_READY",
-            "whatsappSessions.$.lastUpdated": Date.now(),
-          },
-        },
-      ).exec();
-    }
-
-    if (connection === "close") {
-      const reason =
-        new Boom(lastDisconnect?.error)?.output?.statusCode ||
-        DisconnectReason.connectionClosed;
-      logger.error(
-        `Connection closed for ${phoneNumber}. Reason: ${reason}. Error: ${lastDisconnect?.error?.message || "Unknown"}`,
-      );
-
-      delete clients[phoneNumber];
-      delete qrCodes[phoneNumber]; // Hapus QR jika ada
-      delete pairingCodes[phoneNumber]; // Hapus Pairing Code jika ada
-
-      if (qrTimeouts[phoneNumber]) {
-        clearTimeout(qrTimeouts[phoneNumber]);
-        delete qrTimeouts[phoneNumber];
-      }
-
-      if (
-        reason === DisconnectReason.badSession ||
-        reason === DisconnectReason.loggedOut
-      ) {
-        clientStatuses[phoneNumber] = "AUTH_FAILURE";
-        io.emit("client_status", {
-          phoneNumber,
-          status: "AUTH_FAILURE",
-          message: lastDisconnect?.error?.message,
-          userId,
-          secretToken: sessionEntry.secretToken,
-        });
-        logger.warn(
-          `Authentication failure for ${phoneNumber}. Destroying session.`,
-        );
-        await destroySession(
-          phoneNumber,
-          userId,
-          io,
-          `AUTH_FAILURE: ${lastDisconnect?.error?.message || reason}`,
-        );
-      } else if (
-        reason === DisconnectReason.connectionClosed ||
-        reason === DisconnectReason.connectionLost
-      ) {
-        clientStatuses[phoneNumber] = "DISCONNECTED";
-        io.emit("client_status", {
-          phoneNumber,
-          status: "DISCONNECTED",
-          reason: "Connection Lost/Closed",
-          userId,
-          secretToken: sessionEntry.secretToken,
-        });
-        logger.info(
-          `Connection lost/closed for ${phoneNumber}. Attempting reconnect in 5 seconds...`,
-        );
-        setTimeout(() => {
-          createClient(userId, phoneNumber, io, usePairingCode).catch((e) =>
-            logger.error(
-              `Error during reconnect attempt for ${phoneNumber}: ${e.message}`,
-              e.stack,
-            ),
-          );
-        }, 5000);
-      } else {
-        clientStatuses[phoneNumber] = "ERROR";
-        io.emit("client_status", {
-          phoneNumber,
-          status: "ERROR",
-          message: lastDisconnect?.error?.message,
-          userId,
-          secretToken: sessionEntry.secretToken,
-        });
-        logger.error(
-          `Unhandled disconnection reason for ${phoneNumber}: ${lastDisconnect?.error?.message || reason}. Destroying session.`,
-        );
-        await destroySession(
-          phoneNumber,
-          userId,
-          io,
-          `UNHANDLED_DISCONNECT: ${lastDisconnect?.error?.message || reason}`,
-        );
-      }
-
-      await User.updateOne(
-        { _id: userId, "whatsappSessions.phoneNumber": phoneNumber },
-        {
-          $set: {
-            "whatsappSessions.$.status": clientStatuses[phoneNumber],
-            "whatsappSessions.$.lastUpdated": Date.now(),
-          },
-        },
-      );
-    } else if (connection === "open") {
-      if (sock.user) {
-        logger.info(
-          `Client ${phoneNumber} is READY! sock.user: ${sock.user.id.user}`,
-        );
-        clientStatuses[phoneNumber] = "READY";
-        delete qrCodes[phoneNumber];
-        delete pairingCodes[phoneNumber]; // <-- Hapus pairing code setelah terhubung
-        if (qrTimeouts[phoneNumber]) {
-          clearTimeout(qrTimeouts[phoneNumber]);
-          delete qrTimeouts[phoneNumber];
-        }
-        const info = {
-          pushname: sock.user.name,
-          number: sock.user.id.user,
-        };
-        io.emit("client_status", {
-          phoneNumber,
-          status: "READY",
-          userId,
-          secretToken: sessionEntry.secretToken,
-          info,
-        });
-
-        await User.updateOne(
-          { _id: userId, "whatsappSessions.phoneNumber": phoneNumber },
-          {
-            $set: {
-              "whatsappSessions.$.status": "READY",
-              "whatsappSessions.$.lastUpdated": Date.now(),
-            },
-          },
-        );
-      } else {
-        logger.error(
-          `sock.user is undefined after connection 'open' event for ${phoneNumber}!`,
-        );
-        await destroySession(phoneNumber, userId, io, "sock.user_UNDEFINED");
-      }
-    } else {
-      clientStatuses[phoneNumber] = connection?.toUpperCase();
-      User.updateOne(
-        { _id: userId, "whatsappSessions.phoneNumber": phoneNumber },
-        {
-          $set: {
-            "whatsappSessions.$.status": connection?.toUpperCase(),
-            "whatsappSessions.$.lastUpdated": Date.now(),
-          },
-        },
-      ).exec();
-    }
-  });
-
-=======
   sock.ev.on("connection.update", async (update) => handleConnectionUpdate(update, phoneNumber, io));
->>>>>>> v1
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     if (type === "notify") {
       for (const msg of messages) {
@@ -483,8 +260,6 @@ async function createClient(userId, phoneNumber, io, usePairingCode = true) {
         logger.info(
           `New message from ${senderJid} on ${phoneNumber}: ${messageText}`,
         );
-<<<<<<< HEAD
-=======
 
         // Mengambil webhookUrl dari database
         const currentUser = await User.findById(userId);
@@ -506,7 +281,6 @@ async function createClient(userId, phoneNumber, io, usePairingCode = true) {
           logger.info(`No webhook URL configured for ${phoneNumber}. Skipping webhook delivery.`);
         }
 
->>>>>>> v1
         io.emit("new_message", {
           phoneNumber,
           message: messageText,
@@ -698,11 +472,6 @@ async function restoreSessions(io) {
   logger.info("Session restoration process completed.");
 }
 
-<<<<<<< HEAD
-// Fungsi baru untuk mendapatkan pairing code
-function getPairingCode(phoneNumber) {
-  return pairingCodes[phoneNumber];
-=======
 async function setWebhookUrl(userId, phoneNumber, webhookUrl) {
   try {
     // Cek apakah URL valid (contoh sederhana)
@@ -727,37 +496,13 @@ async function setWebhookUrl(userId, phoneNumber, webhookUrl) {
     logger.error(`Error setting webhook URL for ${phoneNumber}: ${error.message}`, error.stack);
     throw error;
   }
->>>>>>> v1
 }
 
 // Fungsi untuk mendapatkan status klien, disaring berdasarkan pengguna
 async function getClientStatusForUser(userId) {
   const user = await User.findById(userId);
-<<<<<<< HEAD
-  if (!user) return {};
-
-  const statuses = {};
-  for (const session of user.whatsappSessions) {
-    const phoneNumber = session.phoneNumber;
-    const sock = clients[phoneNumber]; // Ambil instance Baileys dari cache memori
-    const info =
-      sock && sock.user
-        ? {
-            pushname: sock.user.name,
-            number: sock.user.id.user,
-          }
-        : null;
-
-    statuses[phoneNumber] = {
-      status: clientStatuses[phoneNumber] || session.status || "NOT_FOUND",
-      qr: qrCodes[phoneNumber] || null,
-      info: info,
-      secretToken: session.secretToken,
-    };
-=======
   if (!user) {
     return [];
->>>>>>> v1
   }
 
   // Menggunakan map untuk transformasi yang lebih fungsional dan mengembalikan array objek
@@ -861,11 +606,8 @@ async function sendMedia(
 module.exports = {
   createClient,
   getClientStatusForUser,
-<<<<<<< HEAD
-=======
   getAuthentication,
   setWebhookUrl,
->>>>>>> v1
   sendMessage,
   sendMedia,
   restoreSessions,

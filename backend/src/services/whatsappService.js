@@ -14,6 +14,7 @@ const { Boom } = require("@hapi/boom");
 const pino = require("pino");
 const path = require("path");
 const fs = require("fs-extra");
+const axios = require("axios"); // Pastikan axios sudah diimpor
 const jwt = require("jsonwebtoken");
 const config = require("../config");
 const User = require("../models/User");
@@ -472,6 +473,33 @@ async function restoreSessions(io) {
   logger.info("Session restoration process completed.");
 }
 
+// Fungsi untuk mengirim data ke webhook URL
+async function sendWebhook(webhookUrl, data) {
+  try {
+    const response = await axios.get(webhookUrl, data, {
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      timeout: 10000, // Timeout 10 detik
+    });
+    logger.info(`Webhook sent successfully to ${webhookUrl}. Status: ${response.status}`);
+    return { success: true, status: response.status, data: response.data };
+  } catch (error) {
+    logger.error(`Failed to send webhook to ${webhookUrl}. Error: ${error.message}`);
+    if (error.response) {
+      logger.error(`Webhook error response status: ${error.response.status}`);
+      logger.error(`Webhook error response data: ${JSON.stringify(error.response.data)}`);
+      throw new Error(`Webhook failed with status ${error.response.status}: ${JSON.stringify(error.response.data)}`);
+    } else if (error.request) {
+      logger.error(`No response received for webhook to ${webhookUrl}.`);
+      throw new Error(`No response received for webhook: ${error.message}`);
+    } else {
+      logger.error(`Error setting up webhook request to ${webhookUrl}: ${error.message}`);
+      throw new Error(`Error setting up webhook request: ${error.message}`);
+    }
+  }
+}
+
 async function setWebhookUrl(userId, phoneNumber, webhookUrl) {
   try {
     // Cek apakah URL valid (contoh sederhana)
@@ -612,4 +640,5 @@ module.exports = {
   sendMedia,
   restoreSessions,
   destroySession,
+  sendWebhook
 };

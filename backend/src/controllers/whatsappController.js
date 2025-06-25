@@ -71,8 +71,6 @@ exports.getUserSessionsStatus = async (req, res, next) => {
 // Endpoint untuk mengirim pesan (tidak perlu senderPhoneNumber di body)
 exports.sendMessage = async (req, res, next) => {
     const { senderPhoneNumber, targetNumber, message } = req.body;
-    // Asumsi senderPhoneNumber dimiliki oleh req.user.id
-    const userId = req.user.id;
 
     if (!senderPhoneNumber || !targetNumber || !message) {
         return res.status(400).json({ error: 'Sender phone number, target number, and message are required.' });
@@ -83,13 +81,6 @@ exports.sendMessage = async (req, res, next) => {
     const cleanTargetNumber = targetNumber.replace(/[^0-9]/g, '');
 
     try {
-        // Verifikasi bahwa senderPhoneNumber memang milik user yang login
-        const user = await User.findById(userId);
-        const sessionExists = user.whatsappSessions.some(s => s.phoneNumber === cleanSenderPhoneNumber);
-        if (!sessionExists) {
-            return res.status(403).json({ error: 'You do not own this WhatsApp session.' });
-        }
-
         const result = await whatsappService.sendMessage(cleanSenderPhoneNumber, cleanTargetNumber, message);
         res.status(200).json(result);
     } catch (error) {
@@ -101,7 +92,6 @@ exports.sendMessage = async (req, res, next) => {
 // Endpoint untuk mengirim media (tidak perlu senderPhoneNumber di body)
 exports.sendMedia = async (req, res, next) => {
     const { senderPhoneNumber, targetNumber, filePath, caption } = req.body;
-    const userId = req.user.id; // Asumsi dari token JWT
 
     if (!senderPhoneNumber || !targetNumber || !filePath) {
         return res.status(400).json({ error: 'Sender phone number, target number, and file path are required.' });
@@ -111,12 +101,6 @@ exports.sendMedia = async (req, res, next) => {
     const cleanTargetNumber = targetNumber.replace(/[^0-9]/g, '');
 
     try {
-        const user = await User.findById(userId);
-        const sessionExists = user.whatsappSessions.some(s => s.phoneNumber === cleanSenderPhoneNumber);
-        if (!sessionExists) {
-            return res.status(403).json({ error: 'You do not own this WhatsApp session.' });
-        }
-
         const result = await whatsappService.sendMedia(cleanSenderPhoneNumber, cleanTargetNumber, filePath, caption);
         res.status(200).json(result);
     } catch (error) {

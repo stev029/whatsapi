@@ -1,33 +1,39 @@
-// src/middlewares/authMiddleware.js
+// middlewares/authMiddleware.js
 const jwt = require('jsonwebtoken');
-const config = require('../config');
-const User = require('../models/User'); // Import model User (Mongoose)
+const User = require('../models/User'); // Import model User
 
-function authenticateToken(req, res, next) {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+// Pastikan dotenv sudah dimuat di entry point aplikasi (misal: server.js)
+// require('dotenv').config();
 
-    if (token == null) {
-        return res.status(401).json({ error: 'Authentication token required.' });
+exports.verifyToken = async (req, res, next) => {
+    // Dapatkan token dari header Authorization
+    let token;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+        token = req.headers.authorization.split(' ')[1];
     }
 
-    jwt.verify(token, config.jwtSecret, async (err, userPayload) => {
-        if (err) {
-            console.error('JWT verification error:', err);
-            return res.status(403).json({ error: 'Invalid or expired token.' });
-        }
-        try {
-            const user = await User.findById(userPayload.id); // Cari user di MongoDB
-            if (!user) {
-                return res.status(404).json({ error: 'User not found.' });
-            }
-            req.user = user; // Attach Mongoose user object to request
-            next();
-        } catch (dbError) {
-            console.error('Database error in authMiddleware:', dbError);
-            res.status(500).json({ error: 'Server error during authentication.' });
-        }
-    });
-}
+    if (!token) {
+        return res.status(401).json({ message: 'No token, authorization denied.' });
+    }
 
-module.exports = authenticateToken;
+    try {
+        // Verifikasi token
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        // Cari user berdasarkan ID yang ada di token
+        // req.user akan tersedia di semua controller yang menggunakan middleware ini
+        req.user = await User.findById(decoded.id).select('-password -refreshToken'); // Exclude password dan refresh token
+
+        if (!req.user) {
+            return res.status(401).json({ message: 'User not found for this token.' });
+        }
+
+        next(); // Lanjutkan ke route handler
+    } catch (error) {
+        console.error('Token verification failed:', error);
+        if (error.name === 'TokenExpiredError') {
+            return res.status(401).json({ message: 'Token expired. Please re-authenticate.' });
+        }
+        res.status(401).json({ message: 'Token is not valid.' });
+    }
+};

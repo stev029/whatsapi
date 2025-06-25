@@ -14,6 +14,10 @@ const UserSchema = new mongoose.Schema({
     type: String,
     required: true,
   },
+  refreshToken: { // Tambahkan field untuk menyimpan refresh token
+    type: String,
+    select: false, // Jangan sertakan secara default saat query
+  },
   whatsappSessions: [
     {
       phoneNumber: { type: String, required: true },
@@ -21,24 +25,24 @@ const UserSchema = new mongoose.Schema({
       status: { type: String, default: "LOADING" }, // Status sesi (CONNECTING, QR_READY, READY, LOGOUT, CLOSED)
       lastUpdated: { type: Date, default: Date.now },
       webhookUrl: { type: String, required: false },
-      // Menambahkan field untuk menyimpan kredensial Baileys
-      // Ini akan menyimpan key-pair dan session data lainnya
+      usePairingCode: { type: Boolean, default: false },
     },
   ],
   createdAt: {
     type: Date,
     default: Date.now,
   },
-});
+}, { timestamps: true });
 
-UserSchema.pre("save", async function(next) {
+UserSchema.pre("save", async function (next) {
   if (this.isModified("password")) {
-    this.password = await bcrypt.hash(this.password, 10);
+    const salt = await bcrypt.genSalt(10);
+    this.password = await bcrypt.hash(this.password, salt);
   }
   next();
 });
 
-UserSchema.methods.comparePassword = async function(candidatePassword) {
+UserSchema.methods.comparePassword = async function (candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 

@@ -7,7 +7,13 @@ const config = require('./config');
 const connectDB = require('./models'); // Import fungsi koneksi DB
 
 const server = http.createServer(app);
-const io = socketio(server);
+const io = socketio(server, {
+    cors: {
+        origin: config.allowCorsOrigins,
+        methods: config.allowCorsMethods,
+        allowedHeaders: config.allowCorsHeaders
+    }
+});
 app.set('socketio', io);
 
 // Event Socket.IO untuk koneksi klien web (frontend)

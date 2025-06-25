@@ -473,29 +473,30 @@ async function restoreSessions(io) {
   logger.info("Session restoration process completed.");
 }
 
-// Fungsi untuk mengirim data ke webhook URL
-async function sendWebhook(webhookUrl, data) {
+async function sendWebhook(url, data) {
+  if (!url) {
+    logger.warn('Webhook URL not set. Skipping webhook.');
+    return;
+  }
   try {
-    const response = await axios.post(webhookUrl, data, {
+    logger.info(`Sending webhook to: ${url}`);
+    await axios.post(url, data, {
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json'
       },
-      timeout: 10000, // Timeout 10 detik
+      timeout: 5000 // Timeout 5 detik
     });
-    logger.info(`Webhook sent successfully to ${webhookUrl}. Status: ${response.status}`);
-    return { success: true, status: response.status, data: response.data };
+    logger.info('Webhook sent successfully.');
   } catch (error) {
-    logger.error(`Failed to send webhook to ${webhookUrl}. Error: ${error.message}`);
+    logger.error(`Failed to send webhook to ${url}: ${error.message}`);
+    // Log respons error jika ada
     if (error.response) {
       logger.error(`Webhook error response status: ${error.response.status}`);
       logger.error(`Webhook error response data: ${JSON.stringify(error.response.data)}`);
-      throw new Error(`Webhook failed with status ${error.response.status}: ${JSON.stringify(error.response.data)}`);
     } else if (error.request) {
-      logger.error(`No response received for webhook to ${webhookUrl}.`);
-      throw new Error(`No response received for webhook: ${error.message}`);
+      logger.error('No response received for webhook request.');
     } else {
-      logger.error(`Error setting up webhook request to ${webhookUrl}: ${error.message}`);
-      throw new Error(`Error setting up webhook request: ${error.message}`);
+      logger.error('Error setting up webhook request.');
     }
   }
 }

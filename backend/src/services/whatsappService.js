@@ -210,7 +210,7 @@ async function createClient(userId, phoneNumber, io, usePairingCode = true) {
     auth: state,
     generateHighQualityLinkPreview: true,
     syncFullHistory: true,
-    browser: ["Ubuntu", "Chrome", "20.0.04"], // Sesuaikan dengan browser yang Anda inginkan
+    // browser: ["Ubuntu", "Chrome", "20.0.04"], // Sesuaikan dengan browser yang Anda inginkan
     // Konfigurasi untuk pairing code
   });
 

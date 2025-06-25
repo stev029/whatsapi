@@ -5,11 +5,11 @@ import Auth from './components/Auth';
 import Dashboard from './components/Dashboard';
 
 function App() {
-    const [userToken, setUserToken] = useState(localStorage.getItem('userToken'));
+    const [userToken, setUserToken] = useState(localStorage.getItem('token'));
 
     useEffect(() => {
         // Cek token saat aplikasi dimuat
-        const storedToken = localStorage.getItem('userToken');
+        const storedToken = localStorage.getItem('token');
         if (storedToken) {
             setUserToken(storedToken);
         }
@@ -17,12 +17,12 @@ function App() {
 
     const handleLogin = (token) => {
         setUserToken(token);
-        localStorage.setItem('userToken', token); // Simpan token di localStorage
+        localStorage.setItem('token', token); // Simpan token di localStorage
     };
 
     const handleLogout = () => {
         setUserToken(null);
-        localStorage.removeItem('userToken'); // Hapus token dari localStorage
+        localStorage.removeItem('token'); // Hapus token dari localStorage
     };
 
     return (

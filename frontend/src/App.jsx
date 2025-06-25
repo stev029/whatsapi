@@ -10,16 +10,6 @@ import WebhooksPage from './pages/WebhooksPage'; // Halaman baru
 import { useContext } from 'react';
 import { AuthContext } from './contexts/AuthContext';
 
-<<<<<<< HEAD
-function App() {
-    const [userToken, setUserToken] = useState(localStorage.getItem('token'));
-
-    useEffect(() => {
-        // Cek token saat aplikasi dimuat
-        const storedToken = localStorage.getItem('token');
-        if (storedToken) {
-            setUserToken(storedToken);
-=======
 const App = () => {
   const { isAuthenticated, loading } = useContext(AuthContext);
 
@@ -36,7 +26,6 @@ const App = () => {
         path="/dashboard"
         element={
           isAuthenticated ? <DashboardPage /> : <Navigate to="/login" replace />
->>>>>>> v1
         }
       >
         {/* Nested Routes untuk DashboardPage */}
@@ -46,39 +35,10 @@ const App = () => {
         <Route path="webhooks" element={<WebhooksPage />} />
       </Route>
 
-<<<<<<< HEAD
-    const handleLogin = (token) => {
-        setUserToken(token);
-        localStorage.setItem('token', token); // Simpan token di localStorage
-    };
-
-    const handleLogout = () => {
-        setUserToken(null);
-        localStorage.removeItem('token'); // Hapus token dari localStorage
-    };
-
-    return (
-        <Router>
-            <Routes>
-                <Route
-                    path="/auth"
-                    element={userToken ? <Navigate to="/dashboard" /> : <Auth onLogin={handleLogin} />}
-                />
-                <Route
-                    path="/dashboard"
-                    element={userToken ? <Dashboard userToken={userToken} onLogout={handleLogout} /> : <Navigate to="/auth" />}
-                />
-                <Route path="/" element={<Navigate to={userToken ? "/dashboard" : "/auth"} />} />
-            </Routes>
-        </Router>
-    );
-}
-=======
       {/* Redirect default ke login atau dashboard berdasarkan status otentikasi */}
       <Route path="/" element={<Navigate to={isAuthenticated ? "/dashboard" : "/login"} replace />} />
     </Routes>
   );
 };
->>>>>>> v1
 
 export default App;

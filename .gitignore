@@ -3,3 +3,6 @@ node_modules
 backend/logs
 backend/logs
 backend/logs
+whatsapp_sessions
+package-lock.json
+yarn.lock

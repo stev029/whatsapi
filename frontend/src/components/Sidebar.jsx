@@ -29,6 +29,7 @@ const Sidebar = () => {
                             `flex items-center px-4 py-2 rounded-md text-sm font-medium transition-colors duration-200
                             ${isActive ? 'bg-blue-600 text-white' : 'text-gray-300 hover:bg-gray-700 hover:text-white'}`
                         }
+                        end
                     >
                         <item.icon className="h-5 w-5 mr-3" />
                         {item.name}

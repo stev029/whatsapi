@@ -2,6 +2,7 @@
 import React, { useState, useContext } from 'react';
 import axios from 'axios';
 import { useNavigate, Link } from 'react-router-dom';
+import toast from 'react-hot-toast';
 import { AuthContext } from '../contexts/AuthContext'; // Anda mungkin tidak menggunakan ini untuk register, tapi ada baiknya diimpor
 
 const RegisterPage = () => {
@@ -18,11 +19,12 @@ const RegisterPage = () => {
 
     const handleSubmit = async (e) => {
         e.preventDefault();
-        setRegisterError(null); // Reset error
+        setRegisterError(null);
         setLoading(true);
 
         if (password !== confirmPassword) {
             setRegisterError('Passwords do not match.');
+            toast.error('Passwords do not match.'); // <-- Toast error
             setLoading(false);
             return;
         }
@@ -33,18 +35,13 @@ const RegisterPage = () => {
                 password,
             });
 
-            // Asumsi backend mengembalikan success message
-            alert(response.data.message || 'Registration successful! You can now log in.');
-
-            // Opsional: Langsung login user setelah register (jika backend mengembalikan token)
-            // if (response.data.token && response.data.refreshToken) {
-            //     await login(username, password); // Panggil fungsi login dari AuthContext
-            // }
-
-            navigate('/login'); // Arahkan ke halaman login setelah register sukses
+            toast.success(response.data.message || 'Registration successful! Please log in.'); // <-- Toast sukses
+            navigate('/login');
         } catch (error) {
             console.error('Registration failed:', error.response?.data || error);
-            setRegisterError(error.response?.data?.message || 'Registration failed. Please try again.');
+            const errorMessage = error.response?.data?.message || 'Registration failed. Please try again.';
+            setRegisterError(errorMessage);
+            toast.error(errorMessage); // <-- Toast error
         } finally {
             setLoading(false);
         }

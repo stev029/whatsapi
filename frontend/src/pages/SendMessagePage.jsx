@@ -4,9 +4,10 @@ import axiosInstance from '../api/axios';
 import { AuthContext } from '../contexts/AuthContext';
 import Card from '../components/Card';
 import { io } from 'socket.io-client'; // Tetap perlu socket untuk notifikasi pesan masuk
+import toast from 'react-hot-toast';
 
 const SendMessagePage = () => {
-    const { token, logout, user } = useContext(AuthContext);
+    const { token, user } = useContext(AuthContext);
     const [sessions, setSessions] = useState([]);
     const [selectedSender, setSelectedSender] = useState('');
     const [targetNumber, setTargetNumber] = useState('');
@@ -57,13 +58,9 @@ const SendMessagePage = () => {
         try {
             const response = await axiosInstance.get(`${import.meta.env.VITE_API_BASE_URL}/whatsapp/status`);
             setSessions(response.data.filter(s => s.status === 'READY')); // Hanya tampilkan sesi READY
-            console.log('Fetched sessions:', response.data)
         } catch (err) {
-            console.error('Error fetching sessions:', err);
             setError(err.response?.data?.error || 'Failed to fetch WhatsApp sessions for sending messages.');
-            if (err.response && err.response.status === 401) {
-                logout();
-            }
+            toast.error(err.response?.data?.error || 'Failed to load sessions for sending messages.'); // <-- Toast error
         } finally {
             setLoadingSessions(false);
         }
@@ -72,12 +69,23 @@ const SendMessagePage = () => {
     const sendMessage = async () => {
         setError(null);
         if (!selectedSender) {
-            setError('Please select a sender session.');
+            const errMsg = 'Please select a sender session.';
+            setError(errMsg);
+            toast.error(errMsg);
+            return;
+        }
+
+        if (!targetNumber.startsWith('62')) { // Contoh validasi nomor WhatsApp
+            const errMsg = 'Target number must start with 62 (Indonesia country code).';
+            setError(errMsg);
+            toast.error(errMsg); // <-- Toast error
             return;
         }
 
         if (!targetNumber || !messageText) {
-            setError('Target number and message cannot be empty.');
+            const errMsg = 'Target number and message cannot be empty.';
+            setError(errMsg);
+            toast.error(errMsg);
             return;
         }
 
@@ -88,21 +96,21 @@ const SendMessagePage = () => {
             return;
         }
 
+        const loadingToastId = toast.loading('Sending message...');
         try {
-            await axiosInstance.post(`${import.meta.env.VITE_API_BASE_URL}/whatsapp/send-message`, {
+            const response = await axiosInstance.post(`${import.meta.env.VITE_API_BASE_URL}/whatsapp/send-message`, {
                 senderPhoneNumber: selectedSender,
                 targetNumber,
                 message: messageText
             }, { headers: { "X-Session-Token": selectedSession.secretToken } });
-            alert('Message sent successfully!');
+            toast.success(response.data.message, { id: loadingToastId });
             setMessageText('');
             setTargetNumber('');
         } catch (err) {
             console.error('Error sending message:', err.response?.data || err);
-            setError(err.response?.data?.error || 'Failed to send message.');
-            if (err.response && err.response.status === 401) {
-                logout();
-            }
+            const errMsg = err.response?.data?.error || 'Failed to send message.';
+            setError(errMsg);
+            toast.error(errMsg, { id: loadingToastId }); // Update loading to error
         }
     };
 

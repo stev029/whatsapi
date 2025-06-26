@@ -6,9 +6,10 @@ import { AuthContext } from '../contexts/AuthContext';
 import Card from '../components/Card';
 import { QrCodeIcon, KeyIcon, ArrowPathIcon } from '@heroicons/react/24/outline'; // Impor ikon baru
 import { QRCodeCanvas } from 'qrcode.react';
+import toast from 'react-hot-toast'
 
 const SessionsPage = () => {
-    const { user, token, logout } = useContext(AuthContext);
+    const { user, token } = useContext(AuthContext);
 
     const [phoneNumber, setPhoneNumber] = useState('');
     const [sessions, setSessions] = useState([]);
@@ -23,6 +24,11 @@ const SessionsPage = () => {
     // State untuk mengelola QR/Pairing Code yang sedang ditampilkan
     const [displayQrCodeFor, setDisplayQrCodeFor] = useState(null); // Menyimpan nomor telepon sesi yang QR-nya sedang ditampilkan
     const [displayPairingCodeFor, setDisplayPairingCodeFor] = useState(null); // Menyimpan nomor telepon sesi yang Pairing Code-nya sedang ditampilkan
+
+    const [floatingQrCode, setFloatingQrCode] = useState(null);
+    const [floatingPairingCode, setFloatingPairingCode] = useState(null);
+    const [floatingForSession, setFloatingForSession] = useState(null);
+    const [floatingType, setFloatingType] = useState(null); // 'qr' atau 'pairing'
 
     const [, setSocket] = useState(null);
 
@@ -63,49 +69,37 @@ const SessionsPage = () => {
 
         newSocket.on('qr_code', (data) => {
             console.log('QR Code received:', data);
-            if (data.userId === user.id) {
-                // Tampilkan QR hanya jika ini adalah sesi yang sedang diminta atau baru
-                if (data.phoneNumber === displayQrCodeFor || !displayQrCodeFor) {
-                    setQrCode(data.qr);
-                    setPairingCode(null);
-                } else if (data.phoneNumber === phoneNumber) { // jika ini adalah sesi baru yang belum ada di daftar sesi
-                    setQrCode(data.qr);
-                    setPairingCode(null);
-                }
+            if (data.userId === user.id && data.phoneNumber === floatingForSession && floatingType === 'qr') {
+                setFloatingQrCode(data.qr);
+                setFloatingPairingCode(null);
+            } else if (data.userId === user.id && data.phoneNumber === phoneNumber && !floatingForSession) {
+                setQrCode(data.qr);
+                setPairingCode(null);
             }
         });
 
         newSocket.on('pairing_code', (data) => {
             console.log('Pairing Code received:', data);
-            if (data.userId === user.id) {
-                // Tampilkan Pairing Code hanya jika ini adalah sesi yang sedang diminta atau baru
-                if (data.phoneNumber === displayPairingCodeFor || !displayPairingCodeFor) {
-                    setPairingCode(data.code);
-                    setQrCode(null);
-                } else if (data.phoneNumber === phoneNumber) { // jika ini adalah sesi baru yang belum ada di daftar sesi
-                    setPairingCode(data.code);
-                    setQrCode(null);
-                }
+            if (data.userId === user.id && data.phoneNumber === floatingForSession && floatingType === 'pairing') {
+                setFloatingPairingCode(data.code);
+                setFloatingQrCode(null);
+            } else if (data.userId === user.id && data.phoneNumber === phoneNumber && !floatingForSession) {
+                setPairingCode(data.code);
+                setQrCode(null);
             }
         });
 
         newSocket.on('client_status', (data) => {
             console.log('Client status update:', data);
             if (data.userId === user.id) {
-                setSessions(prevSessions =>
-                    prevSessions.map(session =>
-                        session.phoneNumber === data.phoneNumber
-                            ? { ...session, status: data.status, info: data.info }
-                            : session
-                    )
-                );
+                setSessions(prevSessions => ([...prevSessions, { phoneNumber: data.phoneNumber, status: data.status, info: data.info }]));
                 // Jika sesi siap atau gagal, sembunyikan QR/Pairing code yang sedang ditampilkan
                 if (data.status === 'READY' || data.status === 'AUTH_FAILURE' || data.status === 'DESTROYED') {
-                    if (data.phoneNumber === displayQrCodeFor || data.phoneNumber === displayPairingCodeFor) {
-                        setDisplayQrCodeFor(null);
-                        setDisplayPairingCodeFor(null);
-                        setQrCode(null);
-                        setPairingCode(null);
+                    if (data.phoneNumber === floatingForSession) {
+                        setFloatingQrCode(null);
+                        setFloatingPairingCode(null);
+                        setFloatingForSession(null);
+                        setFloatingType(null);
                     }
                     if (data.status === 'READY') {
                         setPhoneNumber(''); // Clear input for new session if it became ready
@@ -129,29 +123,29 @@ const SessionsPage = () => {
         return () => {
             newSocket.disconnect();
         };
-    }, [token, user, fetchSessions, displayQrCodeFor, displayPairingCodeFor]); // Tambahkan dependensi display state dan phoneNumber
+    }, [token, user, fetchSessions, displayQrCodeFor, displayPairingCodeFor, floatingForSession, floatingType]); // Tambahkan dependensi display state dan phoneNumber
 
     const startSession = async () => {
         setError(null);
         if (!phoneNumber) {
-            setError(new Error('Phone number cannot be empty.')); // Gunakan objek Error
+            const errMsg = 'Phone number cannot be empty.';
+            setError(new Error(errMsg));
+            toast.error(errMsg); // <-- Toast error
             return;
         }
         try {
             setQrCode(null);
             setPairingCode(null);
-            setDisplayQrCodeFor(null); // Reset display states
+            setDisplayQrCodeFor(null);
             setDisplayPairingCodeFor(null);
-            await axiosInstance.post(`${import.meta.env.VITE_API_BASE_URL}/whatsapp/start-session`, { phoneNumber, usePairingCode });
-            alert('Session initiation request sent. Check status.');
-            // Jika berhasil memulai sesi baru, kita tidak perlu fetchSessions lagi karena client_status akan memicu itu
-            // dan kita menunggu QR/Pairing code datang dari socket.
+            await axiosInstance.post(`/whatsapp/start-session`, { phoneNumber, usePairingCode });
+            toast.success(`Session initiation request sent for ${phoneNumber}. Please wait for QR/Pairing Code.`); // <-- Toast sukses
+            // Tidak perlu fetchSessions di sini, biarkan socket updates yang menangani
         } catch (err) {
             console.error('Error starting session:', err.response?.data || err);
-            setError(new Error(err.response?.data?.error || 'Failed to start session.')); // Gunakan objek Error
-            if (err.response && err.response.status === 401) {
-                logout();
-            }
+            const errMsg = err.response?.data?.error || 'Failed to start session.';
+            setError(new Error(errMsg));
+            toast.error(errMsg); // <-- Toast error
         }
     };
 
@@ -159,41 +153,34 @@ const SessionsPage = () => {
         if (window.confirm(`Are you sure you want to delete session for ${numberToDelete}?`)) {
             setError(null);
             try {
-                await axiosInstance.delete(`${import.meta.env.VITE_API_BASE_URL}/whatsapp/delete-session/${numberToDelete}`);
-                alert(`Session for ${numberToDelete} deleted.`);
+                await axiosInstance.delete(`/whatsapp/delete-session/${numberToDelete}`);
+                toast.success(`Session for ${numberToDelete} deleted.`); // <-- Toast sukses
                 fetchSessions();
             } catch (err) {
                 console.error('Error deleting session:', err.response?.data || err);
-                setError(new Error(err.response?.data?.error || 'Failed to delete session.'));
-                if (err.response && err.response.status === 401) {
-                    logout();
-                }
+                const errMsg = err.response?.data?.error || 'Failed to delete session.';
+                setError(new Error(errMsg));
+                toast.error(errMsg); // <-- Toast error
             }
         }
     };
 
     const handleSetWebhook = async (number) => {
         setError(null);
-        if (!webhookUrl) {
-            if (!window.confirm('Are you sure you want to remove the webhook URL for this session?')) {
-                return;
-            }
-        }
         try {
-            const response = await axiosInstance.post(`${import.meta.env.VITE_API_BASE_URL}/whatsapp/set-webhook`, {
+            const response = await axiosInstance.post(`/whatsapp/set-webhook`, {
                 phoneNumber: number,
                 webhookUrl: webhookUrl || null
             });
-            alert(response.data.message);
+            toast.success(response.data.message); // <-- Toast sukses
             setSelectedSessionForWebhook(null);
             setWebhookUrl('');
             fetchSessions();
         } catch (err) {
             console.error('Error setting webhook URL:', err.response?.data || err);
-            setError(new Error(err.response?.data?.error || 'Failed to set webhook URL. Check URL format (http/https).'));
-            if (err.response && err.response.status === 401) {
-                logout();
-            }
+            const errMsg = err.response?.data?.error || 'Failed to set webhook URL. Check URL format (http/https).';
+            setError(new Error(errMsg));
+            toast.error(errMsg); // <-- Toast error
         }
     };
 
@@ -202,27 +189,28 @@ const SessionsPage = () => {
         setWebhookUrl(e.target.value);
     };
 
-    // Fungsi untuk meminta QR/Pairing Code ulang
     const requestSessionCode = async (phoneNumber, usePairingCodeOption) => {
         setError(null);
+        const loadingToastId = toast.loading(`Requesting ${usePairingCodeOption ? 'Pairing Code' : 'QR Code'} for ${phoneNumber}...`); // Toast loading
         try {
-            // Reset QR/Pairing code yang sedang ditampilkan dan set untuk sesi yang diminta
-            setQrCode(null);
-            setPairingCode(null);
-            setDisplayQrCodeFor(usePairingCodeOption ? null : phoneNumber);
-            setDisplayPairingCodeFor(usePairingCodeOption ? phoneNumber : null);
-
-            await axiosInstance.post(`${import.meta.env.VITE_API_BASE_URL}/whatsapp/request-code`, { phoneNumber, usePairingCode: usePairingCodeOption });
-            alert(`Request sent for ${usePairingCodeOption ? 'Pairing Code' : 'QR Code'} for ${phoneNumber}.`);
-        } catch (err) {
-            console.error('Error requesting session code:', err.response?.data || err);
-            setError(new Error(err.response?.data?.error || `Failed to request ${usePairingCodeOption ? 'pairing' : 'QR'} code.`));
-            // Sembunyikan jika ada error
             setDisplayQrCodeFor(null);
             setDisplayPairingCodeFor(null);
-            if (err.response && err.response.status === 401) {
-                logout();
-            }
+            setFloatingQrCode(null);
+            setFloatingPairingCode(null);
+            setFloatingForSession(phoneNumber);
+            setFloatingType(usePairingCodeOption ? 'pairing' : 'qr');
+
+            await axiosInstance.post(`/whatsapp/request-code`, { phoneNumber, usePairingCode: usePairingCodeOption });
+            toast.success(`${usePairingCodeOption ? 'Pairing Code' : 'QR Code'} request sent.`, { id: loadingToastId }); // Update loading to success
+        } catch (err) {
+            console.error('Error requesting session code:', err.response?.data || err);
+            const errMsg = err.response?.data?.error || `Failed to request ${usePairingCodeOption ? 'pairing' : 'QR'} code.`;
+            setError(new Error(errMsg));
+            toast.error(errMsg, { id: loadingToastId }); // Update loading to error
+            setFloatingQrCode(null);
+            setFloatingPairingCode(null);
+            setFloatingForSession(null);
+            setFloatingType(null);
         }
     };
 
@@ -282,12 +270,12 @@ const SessionsPage = () => {
                 ) : (
                     <ul className="space-y-4">
                         {sessions.map(session => (
-                            <li key={session.phoneNumber} className="bg-gray-50 p-4 rounded-lg shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-3">
+                            <li key={session.phoneNumber} className="bg-gray-50 p-4 rounded-lg shadow-sm flex flex-col md:flex-row justify-between items-start md:items-center gap-3 relative">
                                 <div className="flex-grow">
                                     <span className="font-semibold text-lg text-gray-800">{session.phoneNumber}</span>
                                     <span className={`ml-3 px-2 py-1 rounded-full text-xs font-bold ${session.status === 'READY' ? 'bg-green-200 text-green-800' :
-                                            session.status === 'CONNECTING' || session.status === 'QR_READY' || session.status === 'PAIRING_READY' ? 'bg-yellow-200 text-yellow-800' :
-                                                'bg-red-200 text-red-800' // Untuk AUTH_FAILURE, DESTROYED, dll.
+                                        session.status === 'CONNECTING' || session.status === 'QR_READY' || session.status === 'PAIRING_READY' ? 'bg-yellow-200 text-yellow-800' :
+                                            'bg-red-200 text-red-800' // Untuk AUTH_FAILURE, DESTROYED, dll.
                                         }`}>
                                         {session.status}
                                     </span>
@@ -308,18 +296,32 @@ const SessionsPage = () => {
                                         <>
                                             <button
                                                 onClick={() => requestSessionCode(session.phoneNumber, false)}
-                                                className="bg-purple-600 hover:bg-purple-700 text-white py-1 px-3 rounded-md text-sm transition duration-300 flex items-center w-full md:w-auto justify-center"
+                                                className="bg-purple-600 hover:bg-purple-700 text-white py-1 px-3 rounded-md text-sm transition duration-300 flex items-center w-full md:w-auto justify-center relative overflow-visible"
                                             >
                                                 <QrCodeIcon className="h-4 w-4 mr-1" /> Show QR
+                                                {floatingQrCode && floatingForSession === session.phoneNumber && floatingType === 'qr' && (
+                                                    <div className="absolute top-full left-1/2 transform -translate-x-1/2 mt-2 bg-white border border-gray-300 rounded-md shadow-lg p-4 z-10">
+                                                        <h5 className="text-md font-semibold text-purple-800 mb-2">Scan QR Code</h5>
+                                                        <QRCodeCanvas value={floatingQrCode} level='H' className="w-48 h-48 mx-auto bg-white" />
+                                                    </div>
+                                                )}
                                             </button>
                                             <button
                                                 onClick={() => requestSessionCode(session.phoneNumber, true)}
-                                                className="bg-indigo-600 hover:bg-indigo-700 text-white py-1 px-3 rounded-md text-sm transition duration-300 flex items-center w-full md:w-auto justify-center"
+                                                className="bg-indigo-600 hover:bg-indigo-700 text-white py-1 px-3 rounded-md text-sm transition duration-300 flex items-center w-full md:w-auto justify-center relative overflow-visible"
                                             >
                                                 <KeyIcon className="h-4 w-4 mr-1" /> Show Code
+                                                {floatingPairingCode && floatingForSession === session.phoneNumber && floatingType === 'pairing' && (
+                                                    <div className="absolute top-full left-1/2 transform -translate-x-1/2 mt-2 bg-white border border-gray-300 rounded-md shadow-lg p-4 z-10 text-center">
+                                                        <h5 className="text-md font-semibold text-indigo-800 mb-2">Pairing Code</h5>
+                                                        <p className="text-2xl font-bold tracking-widest text-indigo-600 bg-indigo-100 p-2 rounded-md inline-block">
+                                                            {floatingPairingCode}
+                                                        </p>
+                                                    </div>
+                                                )}
                                             </button>
                                             <button
-                                                onClick={() => fetchSessions()} // Tombol refresh status sesi
+                                                onClick={() => fetchSessions()}
                                                 className="bg-gray-600 hover:bg-gray-700 text-white py-1 px-3 rounded-md text-sm transition duration-300 flex items-center w-full md:w-auto justify-center"
                                                 title="Refresh Session Status"
                                             >

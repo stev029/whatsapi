@@ -4,6 +4,7 @@ import axiosInstance from '../api/axios';
 import { AuthContext } from '../contexts/AuthContext';
 import Card from '../components/Card';
 import { io } from 'socket.io-client'; // Tetap perlu socket untuk notifikasi
+import toast from 'react-hot-toast';
 
 const WebhooksPage = () => {
     const { token, logout, user } = useContext(AuthContext);
@@ -30,7 +31,7 @@ const WebhooksPage = () => {
 
         newSocket.on('new_message', (data) => {
             console.log('New message received (WebhooksPage):', data);
-            alert(`Pesan baru dari ${data.from} untuk ${data.phoneNumber}: ${data.message}`);
+            toast.success(`Pesan baru dari ${data.from} untuk ${data.phoneNumber}: ${data.message}`);
         });
 
         newSocket.on('disconnect', () => {
@@ -73,21 +74,22 @@ const WebhooksPage = () => {
                 return;
             }
         }
+
+        const loadingToastId = toast.loading('Sending webhook...');
         try {
             const response = await axiosInstance.post(`${import.meta.env.VITE_API_BASE_URL}/whatsapp/set-webhook`, {
                 phoneNumber: number,
                 webhookUrl: webhookUrl || null
             });
-            alert(response.data.message);
+            toast.success(response.data.message, { id: loadingToastId });
             setSelectedSessionForWebhook(null); // Reset setelah setting webhook
             setWebhookUrl(''); // Bersihkan input
             fetchSessions();
         } catch (err) {
             console.error('Error setting webhook URL:', err.response?.data || err);
-            setError(err.response?.data?.error || 'Failed to set webhook URL. Check URL format (http/https).');
-            if (err.response && err.response.status === 401) {
-                logout();
-            }
+            const msgErr = err.response?.data?.error || 'Failed to set webhook URL. Check URL format (http/https).';
+            setError(msgErr);
+            toast.error(msgErr, { id: loadingToastId });
         }
     };
 

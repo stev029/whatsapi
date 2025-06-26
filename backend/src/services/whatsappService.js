@@ -245,7 +245,7 @@ async function createClient(userId, phoneNumber, io, usePairingCode = true) {
     if (type === "notify") {
       for (const msg of messages) {
         if (
-          // msg.key.fromMe ||
+          msg.key.fromMe ||
           isJidGroup(msg.key.remoteJid) ||
           isJidBroadcast(msg.key.remoteJid)
         ) {

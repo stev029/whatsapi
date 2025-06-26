@@ -92,7 +92,8 @@ exports.sendMessage = async (req, res, next) => {
 
 // Endpoint untuk mengirim media (tidak perlu senderPhoneNumber di body)
 exports.sendMedia = async (req, res, next) => {
-    const { senderPhoneNumber, targetNumber, filePath, caption } = req.body;
+    const { targetNumber, filePath, caption } = req.body;
+    const { senderPhoneNumber } = req; // Diambil dari authenticateSession
 
     if (!senderPhoneNumber || !targetNumber || !filePath) {
         return res.status(400).json({ error: 'Sender phone number, target number, and file path are required.' });
